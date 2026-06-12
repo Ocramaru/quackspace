@@ -1,0 +1,27 @@
+name: Publish to PyPI
+
+# Publishes to PyPI when a GitHub Release is published. Uses PyPI Trusted
+# Publishing (OIDC) — no API token/secret stored in the repo. One-time setup:
+# on PyPI add a "pending publisher" (project quackspace, owner Ocramaru, repo
+# quackspace, workflow publish.yml, environment pypi), and create a GitHub
+# environment named "pypi". See the README "Releasing" section.
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/quackspace
+    permissions:
+      id-token: write # required for trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Build sdist + wheel
+        run: uv build
+      - name: Publish to PyPI (trusted publishing)
+        run: uv publish

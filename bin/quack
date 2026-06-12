@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# `quack` — thin wrapper equivalent to `uv run quack` inside the toolkit,
+# runnable from any directory. The root auto-detects (walk up for .quack/),
+# so commands work no matter where you invoke them.
+set -euo pipefail
+
+# Resolve this script through symlinks to find the real .quack project dir.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+PROJECT_DIR="$(cd -P "$(dirname "$src")/.." && pwd)"
+
+exec uv run --project "$PROJECT_DIR" quack "$@"
