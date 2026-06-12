@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv / virtualenv
+.venv/
+
+# quack runtime + generated artifacts (rebuilt by `quack reindex`; never shipped)
+quack.duckdb
+map.yaml
+diagram.md
+config.yaml
+.index.yaml
+_diagrams.md
+
+# OS
+.DS_Store
