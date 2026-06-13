@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
-from typing import Callable
 
 import duckdb
 
@@ -61,10 +60,7 @@ def _embed_text(cfg, text: str) -> list[float]:
     return [float(x) for x in vec]
 
 
-def build_embeddings(
-    explicit_root: str | None = None,
-    progress: Callable[[int, int, str], None] | None = None,
-) -> dict:
+def build_embeddings(explicit_root: str | None = None) -> dict:
     """Embed every file and store vectors + an HNSW index in the catalog."""
     config = Config.load(explicit_root)
     if not config.embed.configured:
@@ -77,9 +73,6 @@ def build_embeddings(
     con = duckdb.connect(str(path))
     try:
         con.execute("INSTALL vss; LOAD vss;")
-        total = len(space.entries)
-        if progress:
-            progress(0, total, "Preparing embeddings")
         first = _embed_text(
             config.embed, _entry_text(space.entries[0])
         ) if space.entries else []
@@ -92,17 +85,11 @@ def build_embeddings(
             f"CREATE TABLE embeddings (name VARCHAR, rel VARCHAR, vec FLOAT[{dim}]);"
         )
         for i, entry in enumerate(space.entries):
-            if progress:
-                progress(i, total, f"Embedding {entry.rel}")
             vec = first if i == 0 else _embed_text(config.embed, _entry_text(entry))
             con.execute(
                 "INSERT INTO embeddings VALUES (?, ?, ?)", [entry.name, entry.rel, vec]
             )
-            if progress:
-                progress(i + 1, total, f"Embedded {entry.rel}")
         # HNSW index for fast cosine search (vss persists it in-file).
-        if progress:
-            progress(total, total, "Building vector index")
         con.execute("SET hnsw_enable_experimental_persistence = true;")
         con.execute(
             "CREATE INDEX emb_hnsw ON embeddings USING HNSW (vec) "
