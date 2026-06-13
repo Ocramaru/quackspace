@@ -14,6 +14,7 @@ import shlex
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Callable
 
 from . import index_store
 from .config import Config
@@ -144,6 +145,7 @@ def fill_descriptions(
     only: str | None = None,
     dry_run: bool = False,
     include_stale: bool = False,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> GenResult:
     """Generate a description + tags for every file missing one (and, when
     `include_stale` is set, every file whose description has gone stale) and
@@ -157,13 +159,17 @@ def fill_descriptions(
     space = Space.load(explicit_root)
     updated: list[str] = []
     skipped: list[str] = []
+    candidates = [
+        entry
+        for entry in space.entries
+        if ((not entry.description) or (include_stale and entry.stale))
+        and (not only or entry.rel == only)
+    ]
+    total = len(candidates)
 
-    for entry in space.entries:
-        needs = (not entry.description) or (include_stale and entry.stale)
-        if not needs:
-            continue
-        if only and entry.rel != only:
-            continue
+    for i, entry in enumerate(candidates, 1):
+        if progress:
+            progress(i - 1, total, f"Generating {entry.rel}")
         content = entry.body.strip()[:4000] or "(empty or binary file)"
         prompt = META_PROMPT.format(
             path=entry.rel, ext=entry.ext or "(none)", content=content
@@ -171,10 +177,14 @@ def fill_descriptions(
         description, tags = _parse_meta(run_ai(config, prompt))
         if not description:
             skipped.append(entry.rel)
+            if progress:
+                progress(i, total, f"Skipped {entry.rel}")
             continue
         if dry_run:
             tag_str = f"  [tags: {', '.join(tags)}]" if tags else ""
             updated.append(f"{entry.rel}: {description}{tag_str}")
+            if progress:
+                progress(i, total, f"Generated {entry.rel}")
             continue
         index_store.set_meta(
             entry.path.parent,
@@ -184,5 +194,7 @@ def fill_descriptions(
             datetime.now().isoformat(timespec="seconds"),
         )
         updated.append(entry.rel)
+        if progress:
+            progress(i, total, f"Generated {entry.rel}")
 
     return GenResult(updated=updated, skipped=skipped)
