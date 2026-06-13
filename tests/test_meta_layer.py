@@ -91,6 +91,26 @@ def test_recognition_is_lowest_precedence(tmp_path):
     assert guide.described_at != ""
 
 
+def test_frontmatter_description_suppresses_recognition_tags(tmp_path):
+    """A .md with a frontmatter description but no tags must NOT get generic
+    recognition tags; a plain .md with no frontmatter still does (C2)."""
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "notes").mkdir()
+    (root / "notes" / "described.md").write_text(
+        "---\ndescription: Hand-written note\n---\n# Note\n"
+    )
+    (root / "notes" / "plain.md").write_text("# Plain\n\njust text\n")
+    space = Space.load(str(root))
+    by_rel = {e.rel: e for e in space.entries}
+
+    described = by_rel["notes/described.md"]
+    assert described.description == "Hand-written note"
+    assert described.tags == []  # recognition tags suppressed
+
+    plain = by_rel["notes/plain.md"]
+    assert plain.tags == ["docs", "markdown"]  # recognition default applies
+
+
 def test_authored_beats_recognition_and_promotes(tmp_path):
     root = _space_with(tmp_path)
     reindex(str(root))

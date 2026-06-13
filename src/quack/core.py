@@ -118,10 +118,13 @@ def _read_text(path: Path) -> tuple[str, bool]:
 
 @dataclass
 class Entry:
-    """A single file and its metadata. ``description``/``tags`` are *effective*:
-    an authored value from ``<folder>/.index.yaml`` overrides the optional
-    Markdown frontmatter seed; ``links`` is derived from ``[[wikilinks]]`` in the
-    body. Authored values are attached by ``Space.load`` (see ``_overlay``)."""
+    """A single file and its metadata. ``description``/``tags`` are *effective*,
+    resolved per field by precedence: authored ``<folder>/.index.yaml`` →
+    Markdown frontmatter → recognition default (see ``recognize``) → empty. As a
+    special case, frontmatter that supplies a *description* suppresses
+    recognition *tags*, so a hand-written note isn't tagged with generic
+    boilerplate. ``links`` is derived from ``[[wikilinks]]`` in the body.
+    Authored values are attached by ``Space.load`` (see ``_overlay``)."""
 
     path: Path
     root: Path
@@ -187,6 +190,10 @@ class Entry:
                 parsed = list(raw or [])
             if parsed:
                 return parsed
+            # Frontmatter with a description speaks for the file; don't inject
+            # generic recognition tags on top of an authored-in-file note.
+            if str(self._fm.get("description", "")).strip():
+                return []
         if self._recognition is not None:
             return list(self._recognition[1])
         return []
@@ -249,11 +256,17 @@ def _ignored(name: str, rel: str, patterns: set[str]) -> bool:
     return False
 
 
-def iter_files(root: Path, ignores: set[str] | None = None):
-    """Yield every file in the root, skipping ignored dirs/files and quack's own
-    generated artifacts. Not limited to Markdown — this is a meta layer over all
-    files."""
+def walk(root: Path, ignores: set[str] | None = None) -> tuple[list[Entry], list[Path]]:
+    """One filesystem pass → (entries, folders).
+
+    ``entries`` is every non-ignored file (loaded), skipping quack's own
+    generated artifacts. ``folders`` is every non-ignored folder under *root*
+    (excluding root itself), including folders that contain only subfolders, so
+    the per-folder meta layer can cover the whole tree. Both come from a single
+    ``os.walk`` so callers never traverse twice."""
     patterns = ignores if ignores is not None else load_ignores(root)
+    entries: list[Entry] = []
+    folders: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
         dirnames[:] = [
@@ -261,27 +274,26 @@ def iter_files(root: Path, ignores: set[str] | None = None):
             for d in dirnames
             if not _ignored(d, (base / d).relative_to(root).as_posix(), patterns)
         ]
+        for d in sorted(dirnames):
+            folders.append(base / d)
         for fn in filenames:
             rel = (base / fn).relative_to(root).as_posix()
             if fn in GENERATED_FILES or _ignored(fn, rel, patterns):
                 continue
-            yield load_entry(base / fn, root)
+            entries.append(load_entry(base / fn, root))
+    return entries, folders
+
+
+def iter_files(root: Path, ignores: set[str] | None = None):
+    """Yield every non-ignored file in the root. Thin wrapper over :func:`walk`
+    for callers that only need files."""
+    yield from walk(root, ignores)[0]
 
 
 def iter_content_folders(root: Path, ignores: set[str] | None = None):
-    """Yield every non-ignored folder under *root*, recursively, excluding
-    *root* itself. Includes folders that contain only subfolders (no direct
-    files), so the per-folder meta layer can cover the whole tree."""
-    patterns = ignores if ignores is not None else load_ignores(root)
-    for dirpath, dirnames, _filenames in os.walk(root):
-        base = Path(dirpath)
-        dirnames[:] = [
-            d
-            for d in dirnames
-            if not _ignored(d, (base / d).relative_to(root).as_posix(), patterns)
-        ]
-        for d in sorted(dirnames):
-            yield base / d
+    """Yield every non-ignored folder under *root* (excluding root). Thin
+    wrapper over :func:`walk` for callers that only need folders."""
+    yield from walk(root, ignores)[1]
 
 
 @dataclass
@@ -291,13 +303,16 @@ class Space:
 
     root: Path
     entries: list[Entry] = field(default_factory=list)
+    # Every non-ignored folder under root (excluding root), from the same walk
+    # that produced ``entries`` — so consumers never re-traverse the tree.
+    folders: list[Path] = field(default_factory=list)
 
     @classmethod
     def load(cls, explicit: str | None = None) -> "Space":
         root = find_root(explicit)
-        entries = list(iter_files(root))
+        entries, folders = walk(root)
         _overlay(root, entries)
-        return cls(root=root, entries=entries)
+        return cls(root=root, entries=entries, folders=folders)
 
     @cached_property
     def by_name(self) -> dict[str, Entry]:

@@ -133,8 +133,12 @@ def resolve_folders(space: Space) -> dict[str, FolderInfo]:
     for e in space.entries:
         by_folder[e.folder].append(e)
 
+    # space.folders comes from the same walk that produced space.entries — no
+    # second traversal. (Fall back to a walk only if a Space was built without
+    # it, e.g. constructed by hand.)
+    walked = space.folders or core.iter_content_folders(space.root)
     rels: set[str] = {""}
-    for f in core.iter_content_folders(space.root):
+    for f in walked:
         rels.add(f.relative_to(space.root).as_posix())
     rels.update(by_folder)  # safety: any folder with files must be present
 

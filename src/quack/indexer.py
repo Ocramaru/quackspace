@@ -259,9 +259,13 @@ def _dirty_folders(
 def reindex(explicit_root: str | None = None) -> dict:
     """Regenerate all derived artifacts. Returns a summary.
 
-    Skips unchanged folders: only .index.yaml files for folders whose content
-    or metadata changed are rewritten.  When nothing has changed since the last
-    run the catalog and map are also skipped and the call returns immediately.
+    When nothing has changed since the last run, everything is skipped and the
+    call returns immediately. When something changed, only the .index.yaml files
+    for affected folders (and their ancestors) are rewritten — but the DuckDB
+    catalog and its FTS index are rebuilt in full, not row-by-row (they are
+    cheap derived artifacts, and DuckDB's FTS pragma reindexes wholesale). So
+    the incremental win is the avoided YAML churn, not a partial DB update; see
+    MAR-132 for making the catalog rebuild incremental too.
 
     The graph lives in the DuckDB catalog (links table + recursive-CTE
     traversal), not a separate graph.json: `quack search`/`quack sql` pull
