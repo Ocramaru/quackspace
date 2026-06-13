@@ -25,6 +25,26 @@ from pathlib import Path
 
 from . import __version__
 from .config import Config
+
+try:
+    from rich_argparse import RichHelpFormatter
+
+    _FORMATTER: type[argparse.HelpFormatter] = RichHelpFormatter
+except ImportError:  # color is a nicety, never a hard requirement
+    _FORMATTER = argparse.HelpFormatter
+
+
+class _Parser(argparse.ArgumentParser):
+    """ArgumentParser that defaults to colored help on every Python version.
+
+    Subparsers are created with this class too (argparse uses ``type(self)``),
+    so the whole command tree gets the same formatter without per-parser wiring.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("formatter_class", _FORMATTER)
+        super().__init__(*args, **kwargs)
+
 from .diagram import diagram
 from .doctor import diagnose, format_report
 from .generate import AINotConfigured, fill_descriptions
@@ -57,13 +77,14 @@ def _mcp_limit_kwargs(args) -> dict:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="quack",
         description="quack builds a navigable meta layer over your local work "
         "(notes, docs, projects) so LLMs can find anything fast. Document-agnostic.",
         epilog="Run `quack <command> --help` for command-specific options.",
     )
     parser.add_argument("--version", action="version", version=f"quack {__version__}")
+    parser.add_argument("--duck", action="store_true", help=argparse.SUPPRESS)
     # Not required: bare `quack` falls through to printing help (see main()).
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
@@ -403,6 +424,12 @@ def _incomplete_command(parser: argparse.ArgumentParser, args) -> argparse.Argum
 def _dispatch(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.duck:
+        from ._duck import play
+
+        play()
+        return 0
 
     incomplete = _incomplete_command(parser, args)
     if incomplete is not None:  # show the relevant help instead of erroring
