@@ -101,19 +101,22 @@ def find_root(explicit: str | None = None) -> Path:
 
 
 def _read_text(path: Path) -> tuple[str, bool]:
-    """Return (body, is_binary). Files containing NUL bytes or that fail UTF-8
-    decoding are treated as binary and yield an empty body. Oversize files are
-    truncated to the first TEXT_BODY_MAX_BYTES for the index."""
+    """Return (body, is_binary). Files containing NUL bytes are treated as
+    binary and yield an empty body. Oversize files are truncated to the first
+    TEXT_BODY_MAX_BYTES for the index. Content that isn't valid UTF-8 but has no
+    NUL bytes is almost certainly text in a legacy encoding (e.g. Windows-1252
+    smart quotes), so it is decoded leniently rather than dropped or raised."""
     try:
         data = path.read_bytes()
     except OSError:
         return "", False
     if b"\x00" in data[:1024]:
         return "", True
+    chunk = data[:TEXT_BODY_MAX_BYTES]
     try:
-        return data[:TEXT_BODY_MAX_BYTES].decode("utf-8"), False
+        return chunk.decode("utf-8"), False
     except UnicodeDecodeError:
-        return "", True
+        return chunk.decode("utf-8", errors="replace"), False
 
 
 @dataclass
@@ -238,11 +241,13 @@ class Entry:
 
 def load_entry(path: Path, root: Path) -> Entry:
     """Load one file. Markdown is parsed for an optional frontmatter seed; any
-    other file is read as text (empty body if binary/undecodable)."""
-    if path.suffix.lower() == ".md":
-        post = frontmatter.load(path)
-        return Entry(path=path, root=root, body=post.content, _fm=post)
+    other file is read as text. Reads go through ``_read_text`` so a markdown
+    file in a legacy encoding (or an undecodable/binary one) degrades instead of
+    raising — ``frontmatter`` is only handed already-decoded text."""
     body, is_binary = _read_text(path)
+    if not is_binary and path.suffix.lower() == ".md":
+        post = frontmatter.loads(body)
+        return Entry(path=path, root=root, body=post.content, _fm=post)
     return Entry(path=path, root=root, body=body, is_binary=is_binary)
 
 
