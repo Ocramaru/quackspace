@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from . import catalog
 from .core import Entry, Space
 
 # Field weights: a hit in the name matters more than one buried in the body.
@@ -26,7 +27,6 @@ WEIGHT_NAME = 10
 WEIGHT_TAG = 6
 WEIGHT_DESCRIPTION = 4
 WEIGHT_BODY = 1
-
 
 # Reciprocal-rank-fusion constant. Each tier contributes 1/(RRF_K + rank);
 # k flattens the contribution of low ranks so no single tier dominates.
@@ -50,13 +50,10 @@ def _terms(query: str) -> list[str]:
     return [t for t in re.split(r"\s+", query.lower().strip()) if t]
 
 
-def _count(haystack: str, term: str) -> int:
-    return haystack.lower().count(term)
-
-
 def _score_entry(entry: Entry, terms: list[str]) -> tuple[float, list[str]]:
     score = 0.0
     reasons: list[str] = []
+    # Lowercase once; terms are already lowercase from _terms().
     body = entry.body.lower()
     tags_joined = " ".join(entry.tags).lower()
     desc = entry.description.lower()
@@ -72,7 +69,7 @@ def _score_entry(entry: Entry, terms: list[str]) -> tuple[float, list[str]]:
         if term in desc:
             score += WEIGHT_DESCRIPTION
             reasons.append(f"desc~{term}")
-        n = _count(body, term)
+        n = body.count(term)
         if n:
             score += WEIGHT_BODY * n
             reasons.append(f"body~{term}x{n}")
@@ -109,7 +106,10 @@ def search(
     if not terms:
         return []
 
-    # Each tier yields an ordered list of note names; fuse by reciprocal rank.
+    # Pre-compute the catalog path once; both FTS and graph expansion use it
+    # so we never call Space.load() again through catalog.connect().
+    db = catalog.db_path(space)
+
     fused: dict[str, float] = {}
     reasons_by_name: dict[str, list[str]] = {}
     tiers_by_name: dict[str, list[str]] = {}
@@ -127,19 +127,20 @@ def search(
     for name, reasons in structural:
         reasons_by_name[name] = reasons
 
-    # Tier 2: FTS via DuckDB (skip silently if catalog missing).
+    # Tier 2: FTS via DuckDB. Uses the pre-computed db path — no extra Space.load().
     try:
-        from . import catalog
-
-        fts = catalog.fts_search(query, explicit_root, limit=max(limit * 2, 20))
-        add_tier("fts", [_rel_to_name(space, rel) for rel, _desc, _score in fts])
+        fts = catalog.fts_search_path(db, query, limit=max(limit * 2, 20))
+        # by_rel gives O(1) lookup; fall back to rel string if not found.
+        add_tier("fts", [
+            e.name if (e := space.by_rel.get(rel)) is not None else rel
+            for rel, _desc, _score in fts
+        ])
     except Exception:
         pass
 
     # Tier 3: semantic via vss (skip silently if not configured/built).
     try:
         from . import embed
-
         sem = embed.semantic_search(query, explicit_root, limit=max(limit * 2, 20))
         add_tier("semantic", [name for _rel, name, _dist in sem])
     except Exception:
@@ -159,11 +160,9 @@ def search(
 
     # Graph expansion: neighbours of the matches, scored below any direct hit.
     if expand and hits:
-        from . import catalog
-
         seeds = list(hits)
         try:
-            neigh = catalog.neighbours(seeds, explicit_root, hops=1)
+            neigh = catalog.neighbours_path(db, seeds, hops=1)
         except Exception:
             neigh = []
         for name, rel, dist, via_seed in neigh:
@@ -176,13 +175,6 @@ def search(
 
     ranked = sorted(hits.values(), key=lambda h: (-h.score, h.entry.rel))
     return ranked[:limit]
-
-
-def _rel_to_name(space: Space, rel: str) -> str:
-    for e in space.entries:
-        if e.rel == rel:
-            return e.name
-    return rel
 
 
 def format_hits(hits: list[Hit], root: str | None = None) -> str:

@@ -172,6 +172,7 @@ def write_config(
                 "central_limit": DEFAULT_CENTRAL_LIMIT,
             },
         )
+        data.setdefault("gitignore", True)
         path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
         return path
 
@@ -194,6 +195,10 @@ def write_config(
         f"  file_char_limit: {DEFAULT_FILE_CHAR_LIMIT}\n"
         f"  sql_row_limit: {DEFAULT_SQL_ROW_LIMIT}\n"
         f"  central_limit: {DEFAULT_CENTRAL_LIMIT}\n"
+        "\n"
+        "# Set gitignore: false to opt out of quack managing a block in your\n"
+        "# repo's .gitignore (and skip .quack/.gitignore creation).\n"
+        "gitignore: true\n"
     )
     path.write_text(body)
     return path

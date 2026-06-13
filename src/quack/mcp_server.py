@@ -199,9 +199,7 @@ def get_file(path_or_name: str, char_limit: int | None = None) -> dict[str, Any]
     from .core import Space
 
     space = Space.load(_root_arg())
-    entry = space.by_name.get(path_or_name)
-    if entry is None:
-        entry = next((e for e in space.entries if e.rel == path_or_name), None)
+    entry = space.by_name.get(path_or_name) or space.by_rel.get(path_or_name)
     if entry is None:
         return {"root": _root(), "error": f"No file matching {path_or_name!r}."}
     char_limit = _clamp(char_limit, LIMITS.file_chars, MAX_FILE_CHAR_LIMIT)

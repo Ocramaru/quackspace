@@ -18,9 +18,9 @@ import subprocess
 
 import duckdb
 
-from .catalog import db_path
+from .catalog import DB_NAME, db_path
 from .config import Config
-from .core import Space
+from .core import Space, find_root
 from .subprocess_utils import failure_message
 
 
@@ -109,8 +109,8 @@ def semantic_search(
     if not config.embed.configured:
         raise EmbedNotConfigured()
     qvec = _embed_text(config.embed, query)
-    space = Space.load(explicit_root)
-    con = duckdb.connect(str(db_path(space)), read_only=True)
+    db = find_root(explicit_root) / ".quack" / DB_NAME
+    con = duckdb.connect(str(db), read_only=True)
     try:
         con.execute("LOAD vss;")
         dim = len(qvec)  # cast to the fixed-size array type vss requires

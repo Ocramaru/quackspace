@@ -281,6 +281,11 @@ class Space:
         wikilink graph is best-effort across arbitrary file trees."""
         return {e.name: e for e in self.entries}
 
+    @cached_property
+    def by_rel(self) -> dict[str, Entry]:
+        """Map root-relative path → entry, for O(1) path lookups."""
+        return {e.rel: e for e in self.entries}
+
     def resolve_link(self, target: str) -> Entry | None:
         """Resolve a wikilink target to a file (by filename stem)."""
         return self.by_name.get(target)

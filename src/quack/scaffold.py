@@ -155,6 +155,10 @@ def scaffold_root(target: str | None = None) -> Path:
         inherited = _inherited_defaults(root)
         write_config(command="", explicit_root=str(root))
         _merge_defaults(cfg, inherited)
+
+    from .gitignore import ensure_gitignore
+
+    ensure_gitignore(root)
     return root
 
 

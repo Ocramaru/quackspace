@@ -19,7 +19,7 @@ from pathlib import Path
 
 import yaml
 
-from . import index_store
+from . import catalog, index_store
 from .core import Space, content_folders
 
 GENERATED_HEADER = (
@@ -38,18 +38,23 @@ def _folder_description(folder: Path) -> str:
     return ""
 
 
-def write_folder_indexes(space: Space) -> list[Path]:
+def write_folder_indexes(
+    space: Space, dirty_folders: set[Path] | None = None
+) -> list[Path]:
     """Write/merge one editable .index.yaml per folder that contains files.
 
-    Authored ``description``/``tags`` are already overlaid onto each entry by
-    ``Space.load``; here we write them back (preserving them) alongside freshly
-    derived ``links``, dropping entries for files that no longer exist."""
+    When *dirty_folders* is supplied only those folders are (re)written;
+    others are already up-to-date and are skipped.  Pass ``None`` to write
+    every folder (full rebuild).
+    """
     grouped: dict[Path, list] = defaultdict(list)
     for e in space.entries:
         grouped[e.path.parent].append(e)
 
     written: list[Path] = []
     for folder, entries in grouped.items():
+        if dirty_folders is not None and folder not in dirty_folders:
+            continue
         rows = [
             {
                 "name": e.path.name,
@@ -91,17 +96,100 @@ def write_map(space: Space) -> Path:
     return out
 
 
+def _dirty_folders(space: Space) -> set[Path] | None:
+    """Return folders that need their index refreshed, or None for a full build.
+
+    None means: no usable catalog exists yet, rebuild everything.
+    An empty set means: nothing changed, safe to skip.
+    A non-empty set: only these folders (and the catalog) need updating.
+
+    Compares each file's current mtime, description, tags, and described_at
+    directly against what is stored in the catalog — no timestamp arithmetic,
+    no sub-second race conditions.
+
+    Deleted files are detected by set-diffing the indexed rels against the
+    current rels; the folder that used to contain them is marked dirty.
+    """
+    db = catalog.db_path(space)
+    if not db.exists():
+        return None
+
+    try:
+        con = catalog.connect_path(db)
+        try:
+            rows = con.execute(
+                "SELECT rel, file_modified, description, tags_csv, described_at FROM files"
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        # Any error (corrupt DB, schema mismatch, I/O) → full rebuild is safe.
+        return None
+
+    # Build a lookup keyed by rel for O(1) comparisons.
+    indexed: dict[str, tuple[str, str, str, str]] = {
+        rel: (file_mod or "", desc or "", tags_csv or "", desc_at or "")
+        for rel, file_mod, desc, tags_csv, desc_at in rows
+    }
+    indexed_rels = set(indexed)
+    current_rels = {e.rel for e in space.entries}
+    root = space.root
+    dirty: set[Path] = set()
+
+    for e in space.entries:
+        if e.rel not in indexed:
+            dirty.add(e.path.parent)  # new file
+            continue
+        stored_mtime, stored_desc, stored_tags_csv, stored_desc_at = indexed[e.rel]
+        if e.modified != stored_mtime:
+            dirty.add(e.path.parent)
+        elif e.description != stored_desc:
+            dirty.add(e.path.parent)
+        elif ",".join(e.tags) != stored_tags_csv:
+            dirty.add(e.path.parent)
+        elif e.described_at != stored_desc_at:
+            dirty.add(e.path.parent)
+
+    # Deleted files — mark the folder they used to live in.
+    for rel in indexed_rels - current_rels:
+        folder_part = rel.rsplit("/", 1)[0] if "/" in rel else "."
+        dirty.add((root / folder_part).resolve() if folder_part != "." else root.resolve())
+
+    return dirty
+
+
 def reindex(explicit_root: str | None = None) -> dict:
     """Regenerate all derived artifacts. Returns a summary.
+
+    Skips unchanged folders: only .index.yaml files for folders whose content
+    or metadata changed are rewritten.  When nothing has changed since the last
+    run the catalog and map are also skipped and the call returns immediately.
 
     The graph lives in the DuckDB catalog (links table + recursive-CTE
     traversal), not a separate graph.json: `quack search`/`quack sql` pull
     only the slice they need into context instead of loading the whole graph.
     """
-    from . import catalog  # local import keeps duckdb out of the hot path
+    from .gitignore import ensure_gitignore
 
     space = Space.load(explicit_root)
-    indexes = write_folder_indexes(space)
+    ensure_gitignore(space.root)
+
+    dirty = _dirty_folders(space)
+
+    if dirty is not None and not dirty:
+        # Nothing changed — return without touching any files.
+        return {
+            "space": str(space.root),
+            "files": len(space.entries),
+            "folder_indexes": 0,
+            "map": str(space.root / ".quack" / "map.yaml"),
+            "db": str(catalog.db_path(space)),
+        }
+
+    # dirty is None (first run / unusable catalog) or a non-empty set.
+    # Write only the dirty folder indexes; the catalog build reads the
+    # already-loaded space.entries so it stays consistent for all folders.
+    indexes = write_folder_indexes(space, dirty_folders=dirty)
     map_path = write_map(space)
     cat = catalog.build(space)
     return {
