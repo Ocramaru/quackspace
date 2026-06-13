@@ -154,12 +154,25 @@ class Entry:
         rel = self.path.parent.relative_to(self.root).as_posix()
         return "" if rel == "." else rel
 
+    @cached_property
+    def _recognition(self) -> "tuple[str, list[str]] | None":
+        """Zero-cost default ``(description, tags)`` for a well-known file
+        (e.g. ``.gitignore``, ``*.py``), or ``None``. The lowest precedence
+        layer behind authored metadata and frontmatter (see ``recognize``)."""
+        from . import recognize
+
+        return recognize.recognize_file(self.path)
+
     @property
     def description(self) -> str:
         if self._authored_desc:
             return self._authored_desc
         if self._fm is not None:
-            return str(self._fm.get("description", "")).strip()
+            fm = str(self._fm.get("description", "")).strip()
+            if fm:
+                return fm
+        if self._recognition is not None:
+            return self._recognition[0]
         return ""
 
     @property
@@ -169,8 +182,13 @@ class Entry:
         if self._fm is not None:
             raw = self._fm.get("tags", [])
             if isinstance(raw, str):
-                return [t.strip() for t in raw.split(",") if t.strip()]
-            return list(raw or [])
+                parsed = [t.strip() for t in raw.split(",") if t.strip()]
+            else:
+                parsed = list(raw or [])
+            if parsed:
+                return parsed
+        if self._recognition is not None:
+            return list(self._recognition[1])
         return []
 
     @cached_property
@@ -250,14 +268,20 @@ def iter_files(root: Path, ignores: set[str] | None = None):
             yield load_entry(base / fn, root)
 
 
-def content_folders(root: Path, ignores: set[str] | None = None) -> list[Path]:
-    """Top-level content folders (excludes ignored + meta dirs)."""
+def iter_content_folders(root: Path, ignores: set[str] | None = None):
+    """Yield every non-ignored folder under *root*, recursively, excluding
+    *root* itself. Includes folders that contain only subfolders (no direct
+    files), so the per-folder meta layer can cover the whole tree."""
     patterns = ignores if ignores is not None else load_ignores(root)
-    return sorted(
-        p
-        for p in root.iterdir()
-        if p.is_dir() and not _ignored(p.name, p.name, patterns)
-    )
+    for dirpath, dirnames, _filenames in os.walk(root):
+        base = Path(dirpath)
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if not _ignored(d, (base / d).relative_to(root).as_posix(), patterns)
+        ]
+        for d in sorted(dirnames):
+            yield base / d
 
 
 @dataclass

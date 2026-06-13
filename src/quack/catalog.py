@@ -10,10 +10,16 @@ Schema:
     files(name, rel, folder, ext, title, description, tags_csv, n_links,
           n_inbound, is_orphan, is_binary, file_modified, described_at, stale,
           body)
+    folders(folder, parent, description, n_files, diagram, described_at)
     tags(name, tag)                  -- one row per (file, tag)
     links(src, dst, dst_exists)      -- one row per wikilink edge
 A DuckDB FTS index is built over files(name, description, body) for `match_bm25`.
 `stale` is true when the file changed after its description was written.
+
+The `folders` table mirrors the per-folder `.index.yaml` `directories:`
+sections 1:1 (the direct subfolders of X are `WHERE parent = 'X'`, and the
+root's are `WHERE parent = ''`). Type/tag rollups are NOT materialized; they
+stay `GROUP BY` queries the YAML caches.
 """
 
 from __future__ import annotations
@@ -27,17 +33,24 @@ import duckdb
 from .core import Space
 
 DB_NAME = "quack.duckdb"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def db_path(space: Space) -> Path:
     return space.root / ".quack" / DB_NAME
 
 
-def build(space: Space) -> dict:
+def build(space: Space, folder_infos: "dict | None" = None) -> dict:
     """Rebuild the catalog from scratch over the loaded space. Returns a
     summary. The space already carries effective metadata (authored .index.yaml
-    overlaid on each file)."""
+    overlaid on each file). *folder_infos* is the shared folder resolver's
+    output; it is resolved here when not supplied so the ``folders`` table
+    always matches the per-folder indexes and ``map.yaml``."""
+    if folder_infos is None:
+        from . import folders as _folders
+
+        folder_infos = _folders.resolve_folders(space)
+
     path = db_path(space)
     if path.exists():
         path.unlink()  # rebuild clean; the files + .index.yaml are the truth
@@ -63,24 +76,40 @@ def build(space: Space) -> dict:
         tag_rows.extend((e.name, tag) for tag in e.tags)
         link_rows.extend((e.name, dst, dst in names) for dst in e.links)
 
+    # One row per folder (excluding the root); parent "" means the root.
+    folder_rows = [
+        (i.rel, i.parent, i.description, i.n_files, i.diagram, i.described_at)
+        for i in folder_infos.values()
+        if not i.is_root
+    ]
+
     con = duckdb.connect(str(path))
     try:
         _create_schema(con)
         _write_metadata(con)
         if file_rows:
             con.executemany("INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", file_rows)
+        if folder_rows:
+            con.executemany("INSERT INTO folders VALUES (?,?,?,?,?,?)", folder_rows)
         if tag_rows:
             con.executemany("INSERT INTO tags VALUES (?,?)", tag_rows)
         if link_rows:
             con.executemany("INSERT INTO links VALUES (?,?,?)", link_rows)
         _build_fts(con)
         n_files = con.execute("SELECT count(*) FROM files").fetchone()[0]
+        n_folders = con.execute("SELECT count(*) FROM folders").fetchone()[0]
         n_tags = con.execute("SELECT count(*) FROM tags").fetchone()[0]
         n_links = con.execute("SELECT count(*) FROM links").fetchone()[0]
     finally:
         con.close()
 
-    return {"db": str(path), "files": n_files, "tags": n_tags, "links": n_links}
+    return {
+        "db": str(path),
+        "files": n_files,
+        "folders": n_folders,
+        "tags": n_tags,
+        "links": n_links,
+    }
 
 
 def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
@@ -103,6 +132,14 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             described_at  VARCHAR,
             stale         BOOLEAN,
             body        VARCHAR
+        );
+        CREATE TABLE folders (
+            folder      VARCHAR,
+            parent      VARCHAR,
+            description VARCHAR,
+            n_files     INTEGER,
+            diagram     VARCHAR,
+            described_at VARCHAR
         );
         CREATE TABLE tags  (name VARCHAR, tag VARCHAR);
         CREATE TABLE links (src VARCHAR, dst VARCHAR, dst_exists BOOLEAN);
@@ -282,3 +319,14 @@ def fts_search(
     """BM25 full-text search. Returns [(rel, description, score), ...]."""
     space = Space.load(explicit_root)
     return fts_search_path(db_path(space), terms, limit)
+
+
+def list_folders_path(db: Path) -> list[tuple[str, str, str]]:
+    """All folder rows from a known catalog path: [(folder, parent, description)]."""
+    con = connect_path(db)
+    try:
+        return con.execute(
+            "SELECT folder, parent, description FROM folders"
+        ).fetchall()
+    finally:
+        con.close()

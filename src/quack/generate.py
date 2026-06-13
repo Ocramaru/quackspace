@@ -107,31 +107,53 @@ def _parse_meta(text: str) -> tuple[str, list[str]]:
     return text.strip().strip('"'), []
 
 
+def _resolve_folder(root, path_or_name: str):
+    """Resolve a root-relative path to an existing, non-root content folder, or
+    None. Used so ``describe`` can author a *folder* description."""
+    if not path_or_name:
+        return None
+    cand = (root / path_or_name).resolve()
+    if cand == root or not cand.is_dir():
+        return None
+    return cand if root in cand.parents else None
+
+
 def record(
     explicit_root: str | None,
     path_or_name: str,
     description: str,
     tags: list[str] | None = None,
 ) -> str | None:
-    """Write an authored description + tags for one already-indexed file into
-    its folder's `.index.yaml`, stamping `described_at`. Returns the file's
-    root-relative path, or None if no such file is indexed. Shared by the
-    `quack describe` CLI and the MCP `describe` tool — the way an agent that
-    already understands a repo records what it knows."""
+    """Write an authored description + tags for one already-indexed file — or a
+    folder — into the relevant `.index.yaml`, stamping `described_at`. A folder
+    is authored in its *parent's* `directories:` section. Returns the
+    root-relative path, or None if nothing matches. Shared by the `quack
+    describe` CLI and the MCP `describe` tool — the way an agent that already
+    understands a repo records what it knows."""
     space = Space.load(explicit_root)
+    now = datetime.now().isoformat(timespec="seconds")
     entry = space.by_name.get(path_or_name) or next(
         (e for e in space.entries if e.rel == path_or_name), None
     )
-    if entry is None:
-        return None
-    index_store.set_meta(
-        entry.path.parent,
-        entry.path.name,
-        description,
-        list(tags or []),
-        datetime.now().isoformat(timespec="seconds"),
-    )
-    return entry.rel
+    if entry is not None:
+        index_store.set_meta(
+            entry.path.parent, entry.path.name, description, list(tags or []), now
+        )
+        return entry.rel
+
+    folder = _resolve_folder(space.root, path_or_name)
+    if folder is not None:
+        index_store.set_meta(
+            folder.parent,
+            folder.name,
+            description,
+            list(tags or []),
+            now,
+            section=index_store.DIRS_KEY,
+        )
+        return folder.relative_to(space.root).as_posix()
+
+    return None
 
 
 @dataclass

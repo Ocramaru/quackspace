@@ -170,6 +170,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument(
         "--semantic", action="store_true", help="force only vss semantic ranking"
     )
+    p_search.add_argument(
+        "--folders", action="store_true", help="force only folder-level search"
+    )
 
     p_graph = sub.add_parser("graph", help="graph queries over the link structure")
     graph_sub = p_graph.add_subparsers(dest="graph_command", metavar="<subcommand>")
@@ -550,6 +553,16 @@ def _dispatch(argv: list[str] | None) -> int:
             for rel, name, dist in rows:
                 print(f"{rel}  [cosine {dist:.3f}]")
             return 0
+        if args.folders:
+            from .search import format_folder_hits, search_folders
+
+            fhits = search_folders(terms, explicit_root=args.root, limit=args.limit)
+            print(f"# root: {root}  (paths below are relative to it)")
+            print(format_folder_hits(fhits))
+            return 0 if fhits else 1
+
+        from .search import format_folder_hits, route, search_folders
+
         hits = search(
             terms,
             explicit_root=args.root,
@@ -557,7 +570,13 @@ def _dispatch(argv: list[str] | None) -> int:
             expand=not args.no_expand,
         )
         print(format_hits(hits, root=root))
-        return 0 if hits else 1
+        fhits: list = []
+        if route(terms) in ("folders", "both"):
+            fhits = search_folders(terms, explicit_root=args.root, limit=args.limit)
+            if fhits:
+                print("\n# folders")
+                print(format_folder_hits(fhits))
+        return 0 if (hits or fhits) else 1
 
     if args.command == "sql":
         from . import catalog

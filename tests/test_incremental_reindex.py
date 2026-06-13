@@ -6,11 +6,16 @@ import os
 import time
 from pathlib import Path
 
-from quack import catalog
+from quack import catalog, folders
 from quack.generate import record
 from quack.indexer import _dirty_folders, reindex
 from quack.scaffold import scaffold_root
 from quack.core import Space
+
+
+def _dirty(space: Space):
+    """Resolve folder metadata and run dirty detection, as reindex does."""
+    return _dirty_folders(space, folders.resolve_folders(space))
 
 
 def _touch_future(path: Path, seconds: float = 2.0) -> None:
@@ -35,14 +40,14 @@ def _make_space(tmp_path: Path) -> Path:
 def test_dirty_folders_returns_none_before_first_reindex(tmp_path):
     root = _make_space(tmp_path)
     space = Space.load(str(root))
-    assert _dirty_folders(space) is None
+    assert _dirty(space) is None
 
 
 def test_dirty_folders_empty_after_reindex(tmp_path):
     root = _make_space(tmp_path)
     reindex(str(root))
     space = Space.load(str(root))
-    assert _dirty_folders(space) == set()
+    assert _dirty(space) == set()
 
 
 def test_dirty_folders_detects_modified_file(tmp_path):
@@ -52,7 +57,7 @@ def test_dirty_folders_detects_modified_file(tmp_path):
     p.write_text("# A\n\nupdated body\n")
     _touch_future(p)  # advance mtime past catalog's stored value
     space = Space.load(str(root))
-    assert root / "projects" in _dirty_folders(space)
+    assert root / "projects" in _dirty(space)
 
 
 def test_dirty_folders_detects_new_file(tmp_path):
@@ -60,7 +65,7 @@ def test_dirty_folders_detects_new_file(tmp_path):
     reindex(str(root))
     (root / "projects" / "c.md").write_text("# C\n\nnew file\n")
     space = Space.load(str(root))
-    assert root / "projects" in _dirty_folders(space)
+    assert root / "projects" in _dirty(space)
 
 
 def test_dirty_folders_detects_deleted_file(tmp_path):
@@ -68,7 +73,7 @@ def test_dirty_folders_detects_deleted_file(tmp_path):
     reindex(str(root))
     (root / "projects" / "b.md").unlink()
     space = Space.load(str(root))
-    assert root / "projects" in _dirty_folders(space)
+    assert root / "projects" in _dirty(space)
 
 
 def test_dirty_folders_detects_description_change(tmp_path):
@@ -77,7 +82,7 @@ def test_dirty_folders_detects_description_change(tmp_path):
     reindex(str(root))
     record(str(root), "a", "authored description", ["tag1"])
     space = Space.load(str(root))
-    assert root / "projects" in _dirty_folders(space)
+    assert root / "projects" in _dirty(space)
 
 
 def test_dirty_folders_detects_tags_change(tmp_path):
@@ -85,7 +90,7 @@ def test_dirty_folders_detects_tags_change(tmp_path):
     reindex(str(root))
     record(str(root), "a", "", ["new-tag"])
     space = Space.load(str(root))
-    assert root / "projects" in _dirty_folders(space)
+    assert root / "projects" in _dirty(space)
 
 
 # ---------------------------------------------------------------------------

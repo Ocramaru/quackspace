@@ -69,16 +69,20 @@ quack graph path A B           # shortest link path
 
 ## The retrieval ladder (cheapest first — read only what you need)
 
-1. `.quack/map.yaml` — folder-level. Which folder is relevant?
-2. `<folder>/.index.yaml` — file-level. Which 1–3 files match?
+1. `.quack/map.yaml` — global nested tree. Which folder is relevant?
+2. `<folder>/.index.yaml` — its direct `files:` + `directories:`. Which 1–3
+   children match?
 3. The file itself.
 4. `search` / `sql` / `graph_*` — pull only the related slice from the catalog.
 
 ## Ground rules
 
-- Metadata lives in each folder's **editable** `.index.yaml` (`description`,
-  `tags`; `links` derived from `[[wikilinks]]`). Markdown may also carry
-  frontmatter. `quack reindex` merges it all into `.quack/quack.duckdb`.
+- Each folder's **editable** `.index.yaml` describes its direct children — a
+  `files:` section (`description`, `tags`; `links` derived from `[[wikilinks]]`)
+  and a `directories:` section for its subfolders. Well-known files/folders get
+  a recognition default; precedence is authored → frontmatter → recognition →
+  blank. Markdown may also carry frontmatter. `quack reindex` merges it all into
+  `.quack/quack.duckdb` (tables: files, folders, tags, links).
 - Ignore patterns live in `.quackignore` at the root.
 - Full conventions and details: `quack --help`, `quack mcp print`, and the project README.
 """

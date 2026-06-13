@@ -169,14 +169,24 @@ def map() -> dict[str, Any]:
 
 @mcp.tool()
 def search(query: str, limit: int | None = None, expand: bool = True) -> dict[str, Any]:
-    """Auto-hybrid search over all files: fuses keyword, full-text, and semantic
-    (if embeddings exist) ranking, then adds graph neighbours. The primary way
-    to find files. Returns ranked hits with paths relative to `root`."""
+    """Auto-hybrid search: fuses keyword, full-text, and semantic (if embeddings
+    exist) ranking over files, then adds graph neighbours. Also routes the query
+    to folder-level results when it is asking *where*/*which folder*; file and
+    folder hits are returned in separate lists, never blended. The primary way
+    to find things. Paths are relative to `root`."""
+    from .search import route, search_folders
+
     limit = _clamp(limit, LIMITS.search, MAX_SEARCH_LIMIT)
     hits = do_search(query, explicit_root=_root_arg(), limit=limit, expand=expand)
+
+    folder_hits: list = []
+    if route(query) in ("folders", "both"):
+        folder_hits = search_folders(query, explicit_root=_root_arg(), limit=limit)
+
     return {
         "root": _root(),
         "limit": limit,
+        "routed_to": route(query),
         "hits": [
             {
                 "path": h.entry.rel,
@@ -187,6 +197,15 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
                 "related_via": h.via,
             }
             for h in hits
+        ],
+        "folders": [
+            {
+                "path": f.folder,
+                "parent": f.parent,
+                "description": f.description,
+                "via": f.via,
+            }
+            for f in folder_hits
         ],
     }
 
@@ -225,7 +244,9 @@ def get_file(path_or_name: str, char_limit: int | None = None) -> dict[str, Any]
 def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
     """Run read-only SQL against the catalog. Tables: files(name, rel, folder,
     ext, description, tags_csv, n_links, n_inbound, is_orphan, is_binary,
-    file_modified, described_at, stale, body), tags(name, tag),
+    file_modified, described_at, stale, body), folders(folder, parent,
+    description, n_files, diagram, described_at) — the direct subfolders of X
+    are WHERE parent = 'X' (root is ''), tags(name, tag),
     links(src, dst, dst_exists). Results are capped by `row_limit`; add SQL
     LIMIT clauses for more precise queries."""
     row_limit = _clamp(row_limit, LIMITS.sql_rows, MAX_SQL_ROW_LIMIT)
