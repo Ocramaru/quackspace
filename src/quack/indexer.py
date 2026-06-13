@@ -25,6 +25,7 @@ not space size.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -171,25 +172,40 @@ def _parent_folder_path(root: Path, rel: str) -> Path:
     return _folder_path(root, parent_rel)
 
 
-def _dirty_folders(
-    space: Space, folder_infos: dict[str, FolderInfo]
-) -> set[Path] | None:
-    """Return folders that need their index refreshed, or None for a full build.
+@dataclass
+class _Dirty:
+    """What a reindex needs to do, derived by diffing the loaded space against
+    the stored catalog."""
 
-    None means: no usable catalog exists yet, rebuild everything.
-    An empty set means: nothing changed, safe to skip.
-    A non-empty set: only these folders (and the catalog) need updating.
+    full_rebuild: bool  # no/invalid catalog → build everything from scratch
+    folders: set[Path]  # folders whose .index.yaml must be (re)written
+    need_full: bool  # a text/content change requires a full catalog + FTS build
+
+    @property
+    def nothing_to_do(self) -> bool:
+        return not self.full_rebuild and not self.folders
+
+
+def _compute_dirty(
+    space: Space, folder_infos: dict[str, FolderInfo]
+) -> _Dirty:
+    """Diff the loaded space against the stored catalog.
 
     Compares each file's current mtime, description, tags, and described_at —
-    and each folder's resolved description/described_at — directly against what
-    is stored in the catalog. No timestamp arithmetic, no sub-second races.
+    and each folder's resolved description/counts/diagram — directly against
+    what is stored. No timestamp arithmetic, no sub-second races. Deleted
+    files/folders are detected by set-diffing indexed vs current.
 
-    Deleted files/folders are detected by set-diffing indexed vs current; the
-    folder (or parent) that used to contain them is marked dirty.
+    ``need_full`` is set when a change touches the full-text surface (a file
+    added/removed, or its name/body/description changed): DuckDB's FTS index is
+    rebuilt wholesale, so those require a full catalog build. Changes that don't
+    touch text (tags, described_at, folder metadata) take the light in-place
+    path — bodies, links, inbound counts, and the FTS index are provably
+    unchanged, since links/inbound derive from bodies.
     """
     db = catalog.db_path(space)
     if not db.exists():
-        return None
+        return _Dirty(full_rebuild=True, folders=set(), need_full=True)
 
     try:
         con = catalog.connect_path(db)
@@ -204,7 +220,7 @@ def _dirty_folders(
             con.close()
     except Exception:
         # Any error (corrupt DB, schema mismatch, I/O) → full rebuild is safe.
-        return None
+        return _Dirty(full_rebuild=True, folders=set(), need_full=True)
 
     # Build a lookup keyed by rel for O(1) comparisons.
     indexed: dict[str, tuple[str, str, str, str]] = {
@@ -215,29 +231,32 @@ def _dirty_folders(
     current_rels = {e.rel for e in space.entries}
     root = space.root
     dirty: set[Path] = set()
+    need_full = False
 
     for e in space.entries:
         if e.rel not in indexed:
-            dirty.add(e.path.parent)  # new file
+            dirty.add(e.path.parent)  # new file → must enter the FTS index
+            need_full = True
             continue
         stored_mtime, stored_desc, stored_tags_csv, stored_desc_at = indexed[e.rel]
-        if e.modified != stored_mtime:
-            dirty.add(e.path.parent)
-        elif e.description != stored_desc:
-            dirty.add(e.path.parent)
-        elif ",".join(e.tags) != stored_tags_csv:
-            dirty.add(e.path.parent)
-        elif e.described_at != stored_desc_at:
+        changed = False
+        if e.modified != stored_mtime or e.description != stored_desc:
+            changed = True
+            need_full = True  # body/description may have changed → FTS rebuild
+        if ",".join(e.tags) != stored_tags_csv or e.described_at != stored_desc_at:
+            changed = True  # non-text metadata → light path is enough
+        if changed:
             dirty.add(e.path.parent)
 
-    # Deleted files — mark the folder they used to live in.
+    # Deleted files — mark the folder they used to live in; corpus changed.
     for rel in indexed_rels - current_rels:
+        need_full = True
         folder_part = rel.rsplit("/", 1)[0] if "/" in rel else "."
         dirty.add((root / folder_part).resolve() if folder_part != "." else root.resolve())
 
     # Folder metadata drift (authored/vanished description, changed counts, a
     # newly generated diagram). The folder is described in its *parent's*
-    # index, so mark the parent dirty.
+    # index, so mark the parent dirty. None of this touches the FTS surface.
     stored_folders = {
         f: (d or "", int(n or 0), dg or "", da or "")
         for f, d, n, dg, da in folder_rows
@@ -253,19 +272,32 @@ def _dirty_folders(
     for rel in set(stored_folders) - set(current_folders):  # vanished folder
         dirty.add(_parent_folder_path(root, rel))
 
-    return dirty
+    return _Dirty(full_rebuild=False, folders=dirty, need_full=need_full)
+
+
+def _dirty_folders(
+    space: Space, folder_infos: dict[str, FolderInfo]
+) -> set[Path] | None:
+    """Folders whose index must be rewritten, or None for a full build.
+    Thin wrapper over :func:`_compute_dirty` for callers/tests that only need
+    the folder set."""
+    d = _compute_dirty(space, folder_infos)
+    return None if d.full_rebuild else d.folders
 
 
 def reindex(explicit_root: str | None = None) -> dict:
     """Regenerate all derived artifacts. Returns a summary.
 
-    When nothing has changed since the last run, everything is skipped and the
-    call returns immediately. When something changed, only the .index.yaml files
-    for affected folders (and their ancestors) are rewritten — but the DuckDB
-    catalog and its FTS index are rebuilt in full, not row-by-row (they are
-    cheap derived artifacts, and DuckDB's FTS pragma reindexes wholesale). So
-    the incremental win is the avoided YAML churn, not a partial DB update; see
-    MAR-132 for making the catalog rebuild incremental too.
+    Incremental in three tiers, decided by diffing the loaded space against the
+    stored catalog (see :func:`_compute_dirty`):
+
+    * **skipped** — nothing changed: returns immediately, touches nothing.
+    * **light** — only non-text metadata changed (tags, described_at, folder
+      descriptions/counts/diagram): rewrites just the affected `.index.yaml`
+      files and updates the catalog's file-metadata/tags/folders rows in place,
+      leaving bodies, links, inbound counts, and the FTS index untouched.
+    * **full** — a file was added/removed or its name/body/description changed:
+      the FTS index must be rebuilt wholesale, so the whole catalog is rebuilt.
 
     The graph lives in the DuckDB catalog (links table + recursive-CTE
     traversal), not a separate graph.json: `quack search`/`quack sql` pull
@@ -279,30 +311,37 @@ def reindex(explicit_root: str | None = None) -> dict:
     # Resolve folder metadata once and feed it to every consumer (dirty
     # detection, indexes, map, catalog) so they can't drift.
     folder_infos = folders.resolve_folders(space)
-    dirty = _dirty_folders(space, folder_infos)
+    d = _compute_dirty(space, folder_infos)
 
-    if dirty is not None and not dirty:
+    if d.nothing_to_do:
         # Nothing changed — return without touching any files.
         return {
             "space": str(space.root),
             "files": len(space.entries),
             "folder_indexes": 0,
+            "catalog": "skipped",
             "map": str(space.root / ".quack" / "map.yaml"),
             "db": str(catalog.db_path(space)),
         }
 
-    # dirty is None (first run / unusable catalog) or a non-empty set. When
-    # only some folders are dirty, also refresh their ancestors, whose
+    # When only some folders are dirty, also refresh their ancestors, whose
     # directory rollups changed.
-    if dirty is not None:
-        dirty = _expand_dirty(dirty, space.root)
+    dirty = None if d.full_rebuild else _expand_dirty(d.folders, space.root)
     indexes = write_folder_indexes(space, folder_infos, dirty_folders=dirty)
     map_path = write_map(space, folder_infos)
-    cat = catalog.build(space, folder_infos)
+
+    if d.full_rebuild or d.need_full:
+        cat = catalog.build(space, folder_infos)
+        mode = "full"
+    else:
+        cat = catalog.update_light(space, folder_infos)
+        mode = "light"
+
     return {
         "space": str(space.root),
         "files": len(space.entries),
         "folder_indexes": len(indexes),
+        "catalog": mode,
         "map": str(map_path),
         "db": cat["db"],
     }

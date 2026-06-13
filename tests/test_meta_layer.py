@@ -8,7 +8,9 @@ table, and folder embeddings + query routing.
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -278,6 +280,78 @@ def test_folders_table_parent_mapping(tmp_path):
         "SELECT folder FROM folders WHERE parent = 'src'", explicit_root=str(root)
     )
     assert [k[0] for k in kids] == ["src/pkg"]
+
+
+# ---------------------------------------------------------------------------
+# Incremental catalog tiers (skipped / light / full) — MAR-132
+# ---------------------------------------------------------------------------
+
+def _bump_mtime(path: Path, seconds: float = 2.0) -> None:
+    t = time.time() + seconds
+    os.utime(path, (t, t))
+
+
+def test_reindex_skips_when_nothing_changed(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "src").mkdir()
+    (root / "src" / "m.py").write_text("x = 1\n")
+    assert reindex(str(root))["catalog"] == "full"
+    assert reindex(str(root))["catalog"] == "skipped"
+
+
+def test_reindex_light_path_for_tag_only_edit(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "src").mkdir()
+    (root / "src" / "m.py").write_text("x = 1\n")
+    reindex(str(root))
+    # Tag-only authoring: description stays the recognition default, so the
+    # full-text surface is unchanged → light path, FTS not rebuilt.
+    index_store.set_meta(
+        root / "src", "m.py", "", ["hot"],
+        datetime.now().isoformat(timespec="seconds"),
+    )
+    res = reindex(str(root))
+    assert res["catalog"] == "light"
+    _, rows = catalog.query("SELECT tag FROM tags WHERE name = 'm'", explicit_root=str(root))
+    assert ("hot",) in rows
+    # FTS index survived the light update and still matches the file.
+    _, frows = catalog.query(
+        "SELECT count(*) FROM files WHERE rel = 'src/m.py'", explicit_root=str(root)
+    )
+    assert frows[0][0] == 1
+
+
+def test_reindex_light_path_for_folder_authoring(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "src").mkdir()
+    (root / "src" / "m.py").write_text("x = 1\n")
+    reindex(str(root))
+    from quack.generate import record
+
+    record(str(root), "src", "Source root", ["sd"])
+    res = reindex(str(root))
+    assert res["catalog"] == "light"
+    _, rows = catalog.query(
+        "SELECT description FROM folders WHERE folder = 'src'", explicit_root=str(root)
+    )
+    assert rows[0][0] == "Source root"
+
+
+def test_reindex_full_path_for_body_change(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "notes").mkdir()
+    p = root / "notes" / "a.md"
+    p.write_text("# A\n\nhello\n")
+    reindex(str(root))
+    p.write_text("# A\n\nhello brand new searchable words\n")
+    _bump_mtime(p)
+    res = reindex(str(root))
+    assert res["catalog"] == "full"
+    # The new body text is searchable → FTS was rebuilt.
+    from quack.search import search
+
+    hits = search("searchable", explicit_root=str(root), expand=False)
+    assert any(h.entry.rel == "notes/a.md" for h in hits)
 
 
 # ---------------------------------------------------------------------------

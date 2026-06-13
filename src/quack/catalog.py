@@ -112,6 +112,68 @@ def build(space: Space, folder_infos: "dict | None" = None) -> dict:
     }
 
 
+def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
+    """Incremental in-place update for changes that don't touch the full-text
+    surface: file tags / described_at / stale / mtime, the tags table, and the
+    folders table. Bodies, descriptions, names, links, inbound counts, and the
+    FTS index are left untouched — so the existing BM25 index stays valid and is
+    NOT rebuilt. Caller guarantees no file was added/removed and no
+    name/body/description changed (see ``indexer._compute_dirty``)."""
+    if folder_infos is None:
+        from . import folders as _folders
+
+        folder_infos = _folders.resolve_folders(space)
+
+    path = db_path(space)
+    con = duckdb.connect(str(path))
+    try:
+        stored = {
+            rel: (tags_csv or "", da or "", fm or "")
+            for rel, tags_csv, da, fm in con.execute(
+                "SELECT rel, tags_csv, described_at, file_modified FROM files"
+            ).fetchall()
+        }
+        for e in space.entries:
+            current = (",".join(e.tags), e.described_at, e.modified)
+            if stored.get(e.rel) != current:
+                con.execute(
+                    "UPDATE files SET tags_csv = ?, described_at = ?, "
+                    "file_modified = ?, stale = ? WHERE rel = ?",
+                    [current[0], e.described_at, e.modified, e.stale, e.rel],
+                )
+
+        # tags and folders aren't full-text indexed, so rebuilding them wholesale
+        # is cheap and keeps the code simple.
+        con.execute("DELETE FROM tags;")
+        tag_rows = [(e.name, tag) for e in space.entries for tag in e.tags]
+        if tag_rows:
+            con.executemany("INSERT INTO tags VALUES (?,?)", tag_rows)
+
+        con.execute("DELETE FROM folders;")
+        folder_rows = [
+            (i.rel, i.parent, i.description, i.n_files, i.diagram, i.described_at)
+            for i in folder_infos.values()
+            if not i.is_root
+        ]
+        if folder_rows:
+            con.executemany("INSERT INTO folders VALUES (?,?,?,?,?,?)", folder_rows)
+
+        n_files = con.execute("SELECT count(*) FROM files").fetchone()[0]
+        n_folders = con.execute("SELECT count(*) FROM folders").fetchone()[0]
+        n_tags = con.execute("SELECT count(*) FROM tags").fetchone()[0]
+        n_links = con.execute("SELECT count(*) FROM links").fetchone()[0]
+    finally:
+        con.close()
+
+    return {
+        "db": str(path),
+        "files": n_files,
+        "folders": n_folders,
+        "tags": n_tags,
+        "links": n_links,
+    }
+
+
 def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(
         """
