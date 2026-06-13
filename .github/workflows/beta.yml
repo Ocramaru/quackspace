@@ -13,12 +13,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Install Python
         run: uv python install
-      - name: Set dev version
-        run: uv version --bump patch --bump dev=${{ github.run_number }} --no-sync
+      - name: Compute dev version from latest tag
+        run: |
+          last_tag=$(git describe --tags --abbrev=0)
+          base=${last_tag#v}
+          IFS=. read -r major minor patch <<< "$base"
+          dev_version="${major}.${minor}.$((patch + 1)).dev${{ github.run_number }}"
+          echo "Dev version: $dev_version"
+          echo "UV_DYNAMIC_VERSIONING_BYPASS=$dev_version" >> "$GITHUB_ENV"
       - name: Build dev wheel
         run: uv build --wheel
       - name: Smoke test wheel

@@ -680,7 +680,6 @@ wheels = [
 
 [[package]]
 name = "quackspace"
-version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
