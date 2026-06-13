@@ -56,23 +56,8 @@ from .core import find_root
 from . import kiro as kiro_mod
 
 
-DUCK_MESSAGES = {
-    # Change these strings to adjust the live status text shown beside the duck.
-    "reindex": "Reindexing workspace",
-    "generate": "Generating descriptions",
-    "generate_reindex": "Reindexing generated descriptions",
-    "describe_reindex": "Reindexing description",
-    "embed": "Building embeddings",
-    "init_reindex": "Indexing new space",
-}
-
-
 def _add_root_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument("--root", default=None, help="quack root (default: walk up for .quack/)")
-
-
-def _add_quiet_arg(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--quiet", action="store_true", help="disable terminal animations")
 
 
 def _add_mcp_limit_args(p: argparse.ArgumentParser) -> None:
@@ -91,17 +76,6 @@ def _mcp_limit_kwargs(args) -> dict:
     }
 
 
-def _duck_enabled(args) -> bool | None:
-    return False if getattr(args, "quiet", False) else None
-
-
-def _duck_progress(duck):
-    def progress(done: int, total: int, message: str) -> None:
-        duck.update(done=done, total=total, message=message)
-
-    return progress
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="quack",
@@ -116,7 +90,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_reindex = sub.add_parser("reindex", help="regenerate the AI navigation layer")
     _add_root_arg(p_reindex)
-    _add_quiet_arg(p_reindex)
     p_reindex.add_argument(
         "--no-diagrams", action="store_true", help="skip Mermaid diagram generation"
     )
@@ -153,7 +126,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_describe.add_argument(
         "--no-reindex", action="store_true", help="skip the reindex afterwards"
     )
-    _add_quiet_arg(p_describe)
 
     p_where = sub.add_parser("where", help="show workspace, state, package, and command paths")
     _add_root_arg(p_where)
@@ -168,7 +140,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument(
         "dir", nargs="?", default=None, help="target directory (created if missing; default: current)"
     )
-    _add_quiet_arg(p_init)
 
     p_gen = sub.add_parser(
         "generate", help="use the configured AI to fill in missing descriptions"
@@ -183,7 +154,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also refresh descriptions whose file changed since they were written",
     )
-    _add_quiet_arg(p_gen)
 
     p_search = sub.add_parser(
         "search", help="auto-hybrid search (structural + FTS + semantic + graph)"
@@ -215,7 +185,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_embed = sub.add_parser("embed", help="build semantic embeddings (DuckDB vss)")
     _add_root_arg(p_embed)
-    _add_quiet_arg(p_embed)
 
     p_mcp = sub.add_parser("mcp", help="MCP server for LLM tool access")
     mcp_sub = p_mcp.add_subparsers(dest="mcp_command", metavar="<subcommand>")
@@ -383,16 +352,9 @@ def _run_agent(args) -> int:
 
 def _run_generate(args) -> bool:
     """Run description generation and print results. Returns True on success."""
-    from ._duck import swimming
-
-    with swimming(DUCK_MESSAGES["generate"], enabled=_duck_enabled(args)) as duck:
-        result = fill_descriptions(
-            args.root,
-            only=args.only,
-            dry_run=args.dry_run,
-            include_stale=args.stale,
-            progress=_duck_progress(duck),
-        )
+    result = fill_descriptions(
+        args.root, only=args.only, dry_run=args.dry_run, include_stale=args.stale
+    )
     if args.dry_run:
         for line in result.updated:
             print(line)
@@ -403,8 +365,7 @@ def _run_generate(args) -> bool:
     if result.skipped:
         print(f"  skipped {len(result.skipped)} file(s) (no usable output)")
     if not args.dry_run and result.updated:
-        with swimming(DUCK_MESSAGES["generate_reindex"], enabled=_duck_enabled(args)):
-            reindex(args.root)
+        reindex(args.root)
         print("  reindexed")
     return True
 
@@ -476,10 +437,7 @@ def _dispatch(argv: list[str] | None) -> int:
         return 0
 
     if args.command == "reindex":
-        from ._duck import swimming
-
-        with swimming(DUCK_MESSAGES["reindex"], enabled=_duck_enabled(args)):
-            summary = reindex(args.root)
+        summary = reindex(args.root)
         print(
             f"✓ reindexed {summary['files']} files across "
             f"{summary['folder_indexes']} folder(s)\n"
@@ -535,7 +493,6 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command == "describe":
         from . import generate
-        from ._duck import swimming
 
         tags = [t.strip() for t in args.tags.split(",") if t.strip()]
         rel = generate.record(args.root, args.path, args.description, tags)
@@ -544,8 +501,7 @@ def _dispatch(argv: list[str] | None) -> int:
             return 1
         print(f"✓ described {rel}")
         if not args.no_reindex:
-            with swimming(DUCK_MESSAGES["describe_reindex"], enabled=_duck_enabled(args)):
-                reindex(args.root)
+            reindex(args.root)
             print("  reindexed")
         return 0
 
@@ -614,11 +570,9 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command == "embed":
         from .embed import EmbedNotConfigured, build_embeddings
-        from ._duck import swimming
 
         try:
-            with swimming(DUCK_MESSAGES["embed"], enabled=_duck_enabled(args)) as duck:
-                result = build_embeddings(args.root, progress=_duck_progress(duck))
+            result = build_embeddings(args.root)
         except EmbedNotConfigured:
             print("No embedding command. Set `embed.command` in .quack/config.yaml,")
             print("then run `quack embed`. It must print a JSON array of floats.")
@@ -628,12 +582,10 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command == "init":
         from .scaffold import scaffold_root
-        from ._duck import swimming
 
         root = scaffold_root(args.dir or args.root)
         print(f"✓ scaffolded space at {root}")
-        with swimming(DUCK_MESSAGES["init_reindex"], enabled=_duck_enabled(args)):
-            summary = reindex(str(root))
+        summary = reindex(str(root))
         print(f"  reindexed {summary['files']} file(s)")
         print("\nChoose an assistant to auto-write descriptions (optional):\n")
         run_setup(str(root))
