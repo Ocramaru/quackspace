@@ -70,7 +70,7 @@ def test_mcp_launch_uses_source_checkout_when_command_not_installed(tmp_path, mo
 
     assert command == "uv"
     assert args[:2] == ["run", "--project"]
-    assert Path(args[2]).name == "QuackSpace"
+    assert (Path(args[2]) / "pyproject.toml").exists()
     assert "quack-mcp" in args
     assert arg_value(args, "--root") == str(root.resolve())
 
