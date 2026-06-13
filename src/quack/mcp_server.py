@@ -9,11 +9,21 @@ Run with:  uv run quack-mcp   (or `quack mcp` once installed)
 
 from __future__ import annotations
 
+import argparse
+from dataclasses import dataclass
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from . import catalog, graph as graph_mod
+from . import graph as graph_mod
+from . import catalog
+from .config import (
+    Config,
+    DEFAULT_CENTRAL_LIMIT,
+    DEFAULT_FILE_CHAR_LIMIT,
+    DEFAULT_SEARCH_LIMIT,
+    DEFAULT_SQL_ROW_LIMIT,
+)
 from .core import find_root
 from .search import search as do_search
 
@@ -42,9 +52,104 @@ To open a file, join root + path. Never assume an absolute path.
 
 mcp = FastMCP("quack", instructions=INSTRUCTIONS)
 
+MAX_FILE_CHAR_LIMIT = 100_000
+MAX_SQL_ROW_LIMIT = 200
+MAX_SEARCH_LIMIT = 20
+MAX_CENTRAL_LIMIT = 50
+
+
+@dataclass
+class LimitDefaults:
+    search: int = DEFAULT_SEARCH_LIMIT
+    file_chars: int = DEFAULT_FILE_CHAR_LIMIT
+    sql_rows: int = DEFAULT_SQL_ROW_LIMIT
+    central: int = DEFAULT_CENTRAL_LIMIT
+
+
+LIMITS = LimitDefaults()
+SERVER_ROOT: str | None = None
+
+
+def configure_root(explicit_root: str | None = None) -> str:
+    """Set the workspace root used by every MCP tool call."""
+    global SERVER_ROOT
+    SERVER_ROOT = str(find_root(explicit_root))
+    return SERVER_ROOT
+
+
+def _root_arg() -> str | None:
+    return SERVER_ROOT
+
+
+def configure_limits(
+    search_limit: int | None = None,
+    file_char_limit: int | None = None,
+    sql_row_limit: int | None = None,
+    central_limit: int | None = None,
+    base: LimitDefaults | None = None,
+) -> LimitDefaults:
+    """Set process-wide MCP defaults, clamped to safe maximums."""
+    global LIMITS
+    base = base or LimitDefaults()
+    LIMITS = LimitDefaults(
+        search=_clamp(search_limit, base.search, MAX_SEARCH_LIMIT),
+        file_chars=_clamp(file_char_limit, base.file_chars, MAX_FILE_CHAR_LIMIT),
+        sql_rows=_clamp(sql_row_limit, base.sql_rows, MAX_SQL_ROW_LIMIT),
+        central=_clamp(central_limit, base.central, MAX_CENTRAL_LIMIT),
+    )
+    return LIMITS
+
+
+def configure_limits_from_config(
+    explicit_root: str | None = None,
+    search_limit: int | None = None,
+    file_char_limit: int | None = None,
+    sql_row_limit: int | None = None,
+    central_limit: int | None = None,
+) -> LimitDefaults:
+    """Load workspace defaults from config.yaml, then apply flag overrides."""
+    cfg = Config.load(explicit_root)
+    return configure_limits(
+        search_limit=search_limit,
+        file_char_limit=file_char_limit,
+        sql_row_limit=sql_row_limit,
+        central_limit=central_limit,
+        base=LimitDefaults(
+            search=cfg.defaults.search_limit,
+            file_chars=cfg.defaults.file_char_limit,
+            sql_rows=cfg.defaults.sql_row_limit,
+            central=cfg.defaults.central_limit,
+        ),
+    )
+
+
+def _clamp(value: int | None, default: int, maximum: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = default
+    return max(1, min(n, maximum))
+
+
+def _truncate(text: str, limit: int) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    return text[:limit], True
+
+
+def _query_limited(query: str, row_limit: int) -> tuple[list[str], list[tuple], bool]:
+    con = catalog.connect(_root_arg())
+    try:
+        cur = con.execute(query)
+        cols = [d[0] for d in cur.description] if cur.description else []
+        rows = cur.fetchmany(row_limit + 1)
+        return cols, rows[:row_limit], len(rows) > row_limit
+    finally:
+        con.close()
+
 
 def _root() -> str:
-    return str(find_root(None))
+    return SERVER_ROOT or configure_root(None)
 
 
 @mcp.tool()
@@ -53,7 +158,8 @@ def map() -> dict[str, Any]:
     here to decide which folder is relevant."""
     cols, rows = catalog.query(
         "SELECT folder, count(*) AS files FROM files "
-        "WHERE folder <> '' GROUP BY folder ORDER BY files DESC"
+        "WHERE folder <> '' GROUP BY folder ORDER BY files DESC",
+        explicit_root=_root_arg(),
     )
     return {
         "root": _root(),
@@ -62,13 +168,15 @@ def map() -> dict[str, Any]:
 
 
 @mcp.tool()
-def search(query: str, limit: int = 10, expand: bool = True) -> dict[str, Any]:
+def search(query: str, limit: int | None = None, expand: bool = True) -> dict[str, Any]:
     """Auto-hybrid search over all files: fuses keyword, full-text, and semantic
     (if embeddings exist) ranking, then adds graph neighbours. The primary way
     to find files. Returns ranked hits with paths relative to `root`."""
-    hits = do_search(query, limit=limit, expand=expand)
+    limit = _clamp(limit, LIMITS.search, MAX_SEARCH_LIMIT)
+    hits = do_search(query, explicit_root=_root_arg(), limit=limit, expand=expand)
     return {
         "root": _root(),
+        "limit": limit,
         "hits": [
             {
                 "path": h.entry.rel,
@@ -84,17 +192,20 @@ def search(query: str, limit: int = 10, expand: bool = True) -> dict[str, Any]:
 
 
 @mcp.tool()
-def get_file(path_or_name: str) -> dict[str, Any]:
-    """Read one file's full content + metadata. Accepts a root-relative path
-    (src/app/main.py) or a bare file name without extension (main)."""
+def get_file(path_or_name: str, char_limit: int | None = None) -> dict[str, Any]:
+    """Read one file's content + metadata. Accepts a root-relative path
+    (src/app/main.py) or a bare file name without extension (main). Content is
+    truncated by default so agents do not accidentally pull huge files."""
     from .core import Space
 
-    space = Space.load(None)
+    space = Space.load(_root_arg())
     entry = space.by_name.get(path_or_name)
     if entry is None:
         entry = next((e for e in space.entries if e.rel == path_or_name), None)
     if entry is None:
         return {"root": _root(), "error": f"No file matching {path_or_name!r}."}
+    char_limit = _clamp(char_limit, LIMITS.file_chars, MAX_FILE_CHAR_LIMIT)
+    content, truncated = _truncate(entry.body, char_limit)
     return {
         "root": _root(),
         "path": entry.rel,
@@ -105,33 +216,46 @@ def get_file(path_or_name: str) -> dict[str, Any]:
         "is_binary": entry.is_binary,
         "modified": entry.modified,
         "stale": entry.stale,
-        "content": entry.body,
+        "content": content,
+        "content_length": len(entry.body),
+        "content_limit": char_limit,
+        "truncated": truncated,
     }
 
 
 @mcp.tool()
-def sql(query: str) -> dict[str, Any]:
+def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
     """Run read-only SQL against the catalog. Tables: files(name, rel, folder,
     ext, description, tags_csv, n_links, n_inbound, is_orphan, is_binary,
     file_modified, described_at, stale, body), tags(name, tag),
-    links(src, dst, dst_exists)."""
-    cols, rows = catalog.query(query)
-    return {"root": _root(), "columns": cols, "rows": [list(r) for r in rows]}
+    links(src, dst, dst_exists). Results are capped by `row_limit`; add SQL
+    LIMIT clauses for more precise queries."""
+    row_limit = _clamp(row_limit, LIMITS.sql_rows, MAX_SQL_ROW_LIMIT)
+    cols, rows, truncated = _query_limited(query, row_limit)
+    return {
+        "root": _root(),
+        "columns": cols,
+        "rows": [list(r) for r in rows],
+        "row_limit": row_limit,
+        "truncated": truncated,
+    }
 
 
 @mcp.tool()
 def graph_path(src: str, dst: str) -> dict[str, Any]:
     """Shortest path of wikilinks between two files (by name). Returns the node
     names on the path, or null if they are not connected."""
-    return {"root": _root(), "path": graph_mod.shortest_path(src, dst)}
+    return {"root": _root(), "path": graph_mod.shortest_path(src, dst, explicit_root=_root_arg())}
 
 
 @mcp.tool()
-def central(limit: int = 10) -> dict[str, Any]:
+def central(limit: int | None = None) -> dict[str, Any]:
     """Most-connected files (hubs) by link degree."""
-    rows = graph_mod.centrality(limit=limit)
+    limit = _clamp(limit, LIMITS.central, MAX_CENTRAL_LIMIT)
+    rows = graph_mod.centrality(explicit_root=_root_arg(), limit=limit)
     return {
         "root": _root(),
+        "limit": limit,
         "hubs": [{"name": n, "path": r, "degree": d} for n, r, d in rows],
     }
 
@@ -139,7 +263,7 @@ def central(limit: int = 10) -> dict[str, Any]:
 @mcp.tool()
 def clusters() -> dict[str, Any]:
     """Connected components of the link graph. Singletons are orphan files."""
-    return {"root": _root(), "clusters": graph_mod.components()}
+    return {"root": _root(), "clusters": graph_mod.components(explicit_root=_root_arg())}
 
 
 @mcp.tool()
@@ -153,7 +277,7 @@ def describe(
     call reindex() once so the changes show up in search/sql/map."""
     from . import generate
 
-    rel = generate.record(None, path, description, list(tags or []))
+    rel = generate.record(_root_arg(), path, description, list(tags or []))
     if rel is None:
         return {"root": _root(), "error": f"No file matching {path!r}."}
     return {
@@ -171,11 +295,30 @@ def reindex() -> dict[str, Any]:
     reflected in search/sql/map. Call once after recording descriptions."""
     from .indexer import reindex as do_reindex
 
-    summary = do_reindex(None)
+    summary = do_reindex(_root_arg())
     return {"root": _root(), "files": summary["files"]}
 
 
-def main() -> None:
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="quack-mcp")
+    parser.add_argument("--root", default=None, help="quack root containing .quack/")
+    parser.add_argument("--search-limit", type=int, default=None)
+    parser.add_argument("--file-char-limit", type=int, default=None)
+    parser.add_argument("--sql-row-limit", type=int, default=None)
+    parser.add_argument("--central-limit", type=int, default=None)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _parser().parse_args(argv)
+    configure_root(args.root)
+    configure_limits_from_config(
+        explicit_root=_root_arg(),
+        search_limit=args.search_limit,
+        file_char_limit=args.file_char_limit,
+        sql_row_limit=args.sql_row_limit,
+        central_limit=args.central_limit,
+    )
     mcp.run()
 
 

@@ -18,6 +18,7 @@ from datetime import datetime
 from . import index_store
 from .config import Config
 from .core import Space
+from .subprocess_utils import failure_message
 
 # CLI assistants wrap output in ANSI color codes and a leading prompt marker.
 # Those are terminal-only decoration; in the store they are corruption, so we
@@ -75,8 +76,14 @@ def run_ai(config: Config, prompt: str) -> str:
             f"AI command not found: '{argv[0]}'. Run `quack setup` to choose an "
             "assistant, or fix `ai.command` in .quack/config.yaml."
         )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"AI command timed out after {config.ai.timeout}s running {argv[0]!r}."
+        )
     if proc.returncode != 0:
-        raise RuntimeError(f"AI command failed ({proc.returncode}): {proc.stderr.strip()}")
+        raise RuntimeError(
+            failure_message("AI", argv, proc.returncode, proc.stdout, proc.stderr)
+        )
     return _clean(proc.stdout)
 
 

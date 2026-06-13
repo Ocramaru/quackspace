@@ -1,0 +1,51 @@
+name: Build beta wheel
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_testpypi:
+        description: Publish the dev build to TestPyPI
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Install Python
+        run: uv python install
+      - name: Set dev version
+        run: uv version --bump patch --bump dev=${{ github.run_number }} --no-sync
+      - name: Build dev wheel
+        run: uv build --wheel
+      - name: Smoke test wheel
+        run: uv run --isolated --no-project --with dist/*.whl tests/smoke_test.py
+      - name: Upload dev wheel artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: quackspace-dev-wheel
+          path: dist/*.whl
+
+  publish-testpypi:
+    if: ${{ inputs.publish_testpypi }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/quackspace
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Download dev wheel artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: quackspace-dev-wheel
+          path: dist
+      - name: Publish to TestPyPI
+        run: uv publish --publish-url https://test.pypi.org/legacy/ --check-url https://test.pypi.org/simple/ --trusted-publishing automatic

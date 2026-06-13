@@ -18,7 +18,7 @@ to run `quack setup` rather than failing with a traceback.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -27,6 +27,10 @@ from .core import find_root
 
 CONFIG_NAME = "config.yaml"
 DEFAULT_AI_TIMEOUT = 120
+DEFAULT_SEARCH_LIMIT = 10
+DEFAULT_FILE_CHAR_LIMIT = 20_000
+DEFAULT_SQL_ROW_LIMIT = 50
+DEFAULT_CENTRAL_LIMIT = 10
 
 # Known assistants the setup selector offers. `binary` is what we probe for on
 # PATH; `command` is written into config.yaml. Order is the menu order.
@@ -87,10 +91,21 @@ class EmbedConfig:
 
 
 @dataclass
+class DefaultsConfig:
+    """Workspace-tunable defaults for agent-facing bounded outputs."""
+
+    search_limit: int = DEFAULT_SEARCH_LIMIT
+    file_char_limit: int = DEFAULT_FILE_CHAR_LIMIT
+    sql_row_limit: int = DEFAULT_SQL_ROW_LIMIT
+    central_limit: int = DEFAULT_CENTRAL_LIMIT
+
+
+@dataclass
 class Config:
     ai: AIConfig
     embed: EmbedConfig
-    path: Path | None  # the config file that was loaded, if any
+    path: Path | None = None  # the config file that was loaded, if any
+    defaults: DefaultsConfig = field(default_factory=DefaultsConfig)
 
     @classmethod
     def load(cls, explicit_root: str | None = None) -> "Config":
@@ -111,7 +126,19 @@ class Config:
             dim=int(emb_raw.get("dim", 0)),
             timeout=int(emb_raw.get("timeout", DEFAULT_AI_TIMEOUT)),
         )
-        return cls(ai=ai, embed=embed, path=path if path.exists() else None)
+        defaults_raw = data.get("defaults", {}) or {}
+        defaults = DefaultsConfig(
+            search_limit=int(defaults_raw.get("search_limit", DEFAULT_SEARCH_LIMIT)),
+            file_char_limit=int(defaults_raw.get("file_char_limit", DEFAULT_FILE_CHAR_LIMIT)),
+            sql_row_limit=int(defaults_raw.get("sql_row_limit", DEFAULT_SQL_ROW_LIMIT)),
+            central_limit=int(defaults_raw.get("central_limit", DEFAULT_CENTRAL_LIMIT)),
+        )
+        return cls(
+            ai=ai,
+            embed=embed,
+            path=path if path.exists() else None,
+            defaults=defaults,
+        )
 
 
 def write_config(
@@ -120,9 +147,34 @@ def write_config(
     timeout: int = DEFAULT_AI_TIMEOUT,
     skip: bool = False,
 ) -> Path:
-    """Write .quack/config.yaml with the chosen AI command (or an opt-out)."""
+    """Write .quack/config.yaml with the chosen AI command (or an opt-out).
+
+    Existing non-AI settings are user-owned and preserved. In particular,
+    `defaults:` controls MCP output limits and should not be reset by setup.
+    """
     root = find_root(explicit_root)
     path = root / ".quack" / CONFIG_NAME
+
+    if path.exists():
+        try:
+            data = yaml.safe_load(path.read_text()) or {}
+        except yaml.YAMLError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data["ai"] = {"command": command, "timeout": timeout, "skip": skip}
+        data.setdefault(
+            "defaults",
+            {
+                "search_limit": DEFAULT_SEARCH_LIMIT,
+                "file_char_limit": DEFAULT_FILE_CHAR_LIMIT,
+                "sql_row_limit": DEFAULT_SQL_ROW_LIMIT,
+                "central_limit": DEFAULT_CENTRAL_LIMIT,
+            },
+        )
+        path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        return path
+
     body = (
         "# Space configuration.\n\n"
         "ai:\n"
@@ -134,6 +186,14 @@ def write_config(
         "  # Set skip: true to use Space without AI; descriptions stay manual and\n"
         "  # `quack generate` will not offer to set up an assistant.\n"
         f"  skip: {'true' if skip else 'false'}\n"
+        "\n"
+        "defaults:\n"
+        "  # Agent-facing output defaults. Tool-call arguments and MCP serve flags\n"
+        "  # can override these, but these are the persistent workspace defaults.\n"
+        f"  search_limit: {DEFAULT_SEARCH_LIMIT}\n"
+        f"  file_char_limit: {DEFAULT_FILE_CHAR_LIMIT}\n"
+        f"  sql_row_limit: {DEFAULT_SQL_ROW_LIMIT}\n"
+        f"  central_limit: {DEFAULT_CENTRAL_LIMIT}\n"
     )
     path.write_text(body)
     return path

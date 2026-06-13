@@ -21,7 +21,7 @@ import frontmatter
 # Marker directory that identifies a quack root (like .git for a repo).
 MARKER_DIR = ".quack"
 
-# Always-ignored dirs (the toolkit + common noise). Users extend this with a
+# Always-ignored dirs (quack state + common noise). Users extend this with a
 # `.quackignore` file at the root; these built-ins are never indexable.
 DEFAULT_IGNORED_DIRS = {".quack", ".obsidian", ".git", ".trash", "node_modules"}
 
@@ -30,6 +30,8 @@ DEFAULT_IGNORED_DIRS = {".quack", ".obsidian", ".git", ".trash", "node_modules"}
 GENERATED_FILES = {
     "_diagrams.md",  # per-folder Mermaid graph
     "QUACK.md",      # the navigation anchor
+    ".quackignore",  # root ignore config
+    ".mcp.json",     # project-local MCP config
     ".index.yaml",   # the editable metadata store
     ".folder.md",    # folder-description marker
     ".DS_Store",
@@ -68,10 +70,17 @@ def find_root(explicit: str | None = None) -> Path:
     the way git locates a repo, by walking up for the `.quack/` marker.
 
     Order: explicit arg > walk up from cwd for `.quack/` > $QUACK_ROOT >
-    $OBSIDIAN_VAULT (convenience for Obsidian users) > package location.
+    $OBSIDIAN_VAULT (convenience for Obsidian users). If none resolves to a
+    directory with `.quack/`, the caller is outside a quack space.
     """
     if explicit:
-        return Path(explicit).expanduser().resolve()
+        root = Path(explicit).expanduser().resolve()
+        if (root / MARKER_DIR).is_dir():
+            return root
+        raise RuntimeError(
+            f"No quack space at {root}: missing {MARKER_DIR}/. "
+            "Run `quack init` there first, or pass --root to an initialized space."
+        )
     here = Path.cwd().resolve()
     for candidate in (here, *here.parents):
         if (candidate / MARKER_DIR).is_dir():
@@ -79,9 +88,16 @@ def find_root(explicit: str | None = None) -> Path:
     for env_var in ("QUACK_ROOT", "OBSIDIAN_VAULT"):
         env = os.environ.get(env_var)
         if env:
-            return Path(env).expanduser().resolve()
-    # .../<root>/.quack/src/quack/core.py -> .../<root>
-    return Path(__file__).resolve().parents[3]
+            root = Path(env).expanduser().resolve()
+            if (root / MARKER_DIR).is_dir():
+                return root
+            raise RuntimeError(
+                f"{env_var} points to {root}, but it is missing {MARKER_DIR}/."
+            )
+    raise RuntimeError(
+        "No quack space found. Run `quack init` in this directory, "
+        "or pass --root to a directory containing .quack/."
+    )
 
 
 def _read_text(path: Path) -> tuple[str, bool]:

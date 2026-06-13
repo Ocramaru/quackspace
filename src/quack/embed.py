@@ -21,10 +21,13 @@ import duckdb
 from .catalog import db_path
 from .config import Config
 from .core import Space
+from .subprocess_utils import failure_message
 
 
 class EmbedNotConfigured(Exception):
     """No embedding command set in config."""
+
+
 
 
 def _embed_text(cfg, text: str) -> list[float]:
@@ -43,8 +46,14 @@ def _embed_text(cfg, text: str) -> list[float]:
             f"Embedding command not found: '{argv[0]}'. Fix `embed.command` in "
             ".quack/config.yaml."
         )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"Embedding command timed out after {cfg.timeout}s running {argv[0]!r}."
+        )
     if proc.returncode != 0:
-        raise RuntimeError(f"Embedding command failed: {proc.stderr.strip()}")
+        raise RuntimeError(
+            failure_message("Embedding", argv, proc.returncode, proc.stdout, proc.stderr)
+        )
     vec = json.loads(proc.stdout)
     if not isinstance(vec, list) or not vec:
         raise RuntimeError("Embedding command did not return a non-empty JSON array.")

@@ -22,37 +22,68 @@ from .core import find_root
 SERVER_NAME = "quack"
 
 
-def launch_command(explicit_root: str | None = None) -> tuple[str, list[str]]:
+def server_limit_args(
+    search_limit: int | None = None,
+    file_char_limit: int | None = None,
+    sql_row_limit: int | None = None,
+    central_limit: int | None = None,
+) -> list[str]:
+    args: list[str] = []
+    for flag, value in (
+        ("--search-limit", search_limit),
+        ("--file-char-limit", file_char_limit),
+        ("--sql-row-limit", sql_row_limit),
+        ("--central-limit", central_limit),
+    ):
+        if value is not None:
+            args.extend([flag, str(value)])
+    return args
+
+
+def launch_command(
+    explicit_root: str | None = None,
+    search_limit: int | None = None,
+    file_char_limit: int | None = None,
+    sql_row_limit: int | None = None,
+    central_limit: int | None = None,
+) -> tuple[str, list[str]]:
     """The stdio launch command an MCP client runs to start the server.
 
-    Two install shapes, two commands:
-    - Vendored checkout (the toolkit's source lives in `<root>/.quack`):
-      `uv run --project <toolkit> quack-mcp` — self-contained, uses that
-      project's own venv, no PATH install needed.
-    - Global install (`uv tool`/`pipx`): `<root>/.quack` is just a marker dir,
-      so launch the `quack-mcp` command that's already on PATH.
+    Normal installs expose `quack-mcp` on PATH. During development from a source
+    checkout, fall back to `uv run --project <checkout> quack-mcp`. The user's
+    `.quack/` directory is workspace state, not a vendored copy of the tool.
     """
-    toolkit = find_root(explicit_root) / ".quack"
-    if (toolkit / "pyproject.toml").exists():
-        return "uv", ["run", "--project", str(toolkit), "quack-mcp"]
+    root = find_root(explicit_root)
+    root_args = ["--root", str(root)]
+    limit_args = server_limit_args(
+        search_limit=search_limit,
+        file_char_limit=file_char_limit,
+        sql_row_limit=sql_row_limit,
+        central_limit=central_limit,
+    )
     if shutil.which("quack-mcp"):
-        return "quack-mcp", []
-    # No source and nothing on PATH: emit the vendored form as a best guess.
-    return "uv", ["run", "--project", str(toolkit), "quack-mcp"]
-
-
-def server_entry(explicit_root: str | None = None) -> dict:
-    cmd, args = launch_command(explicit_root)
-    return {"command": cmd, "args": args}
-
-
-def mcp_json_snippet(explicit_root: str | None = None) -> str:
-    return json.dumps(
-        {"mcpServers": {SERVER_NAME: server_entry(explicit_root)}}, indent=2
+        return "quack-mcp", [*root_args, *limit_args]
+    package_root = Path(__file__).resolve().parents[2]
+    if (package_root / "pyproject.toml").exists():
+        return "uv", ["run", "--project", str(package_root), "quack-mcp", *root_args, *limit_args]
+    raise RuntimeError(
+        "Could not find quack-mcp on PATH or a source checkout to run from. "
+        "Install quack first with `uv tool install quackspace`."
     )
 
 
-def write_project_config(explicit_root: str | None = None) -> Path:
+def server_entry(explicit_root: str | None = None, **limit_kwargs) -> dict:
+    cmd, args = launch_command(explicit_root, **limit_kwargs)
+    return {"command": cmd, "args": args}
+
+
+def mcp_json_snippet(explicit_root: str | None = None, **limit_kwargs) -> str:
+    return json.dumps(
+        {"mcpServers": {SERVER_NAME: server_entry(explicit_root, **limit_kwargs)}}, indent=2
+    )
+
+
+def write_project_config(explicit_root: str | None = None, **limit_kwargs) -> Path:
     """Write/merge the project-root .mcp.json (the auto-discover convention)."""
     root = find_root(explicit_root)
     path = root / ".mcp.json"
@@ -62,7 +93,7 @@ def write_project_config(explicit_root: str | None = None) -> Path:
             data = json.loads(path.read_text()) or {}
         except json.JSONDecodeError:
             data = {}
-    data.setdefault("mcpServers", {})[SERVER_NAME] = server_entry(explicit_root)
+    data.setdefault("mcpServers", {})[SERVER_NAME] = server_entry(explicit_root, **limit_kwargs)
     path.write_text(json.dumps(data, indent=2) + "\n")
     return path
 
@@ -84,10 +115,10 @@ CLIENTS = [
 ]
 
 
-def register_command(client: str, explicit_root: str | None = None) -> list[str]:
+def register_command(client: str, explicit_root: str | None = None, **limit_kwargs) -> list[str]:
     """The exact CLI command that registers quack with a client (for display
     and execution). Both kiro-cli and claude take `... mcp add ... -- <cmd>`."""
-    cmd, args = launch_command(explicit_root)
+    cmd, args = launch_command(explicit_root, **limit_kwargs)
     if client == "kiro":
         return [
             "kiro-cli", "mcp", "add", "--name", SERVER_NAME,
@@ -98,9 +129,9 @@ def register_command(client: str, explicit_root: str | None = None) -> list[str]
     raise ValueError(client)
 
 
-def run_register(client: str, explicit_root: str | None = None) -> tuple[bool, str]:
+def run_register(client: str, explicit_root: str | None = None, **limit_kwargs) -> tuple[bool, str]:
     """Execute a client's register command. Returns (ok, output)."""
-    argv = register_command(client, explicit_root)
+    argv = register_command(client, explicit_root, **limit_kwargs)
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)
     except FileNotFoundError:

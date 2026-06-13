@@ -26,6 +26,7 @@ import duckdb
 from .core import Space
 
 DB_NAME = "quack.duckdb"
+SCHEMA_VERSION = 1
 
 
 def db_path(space: Space) -> Path:
@@ -50,6 +51,7 @@ def build(space: Space) -> dict:
     con = duckdb.connect(str(path))
     try:
         _create_schema(con)
+        _write_metadata(con)
         for e in space.entries:
             con.execute(
                 "INSERT INTO files VALUES "
@@ -92,6 +94,7 @@ def build(space: Space) -> dict:
 def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(
         """
+        CREATE TABLE metadata (key VARCHAR PRIMARY KEY, value VARCHAR);
         CREATE TABLE files (
             name        VARCHAR,
             rel         VARCHAR,
@@ -124,6 +127,36 @@ def _build_fts(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
+def _write_metadata(con: duckdb.DuckDBPyConnection) -> None:
+    con.execute("INSERT INTO metadata VALUES ('schema_version', ?)", [str(SCHEMA_VERSION)])
+
+
+def _validate_schema(con: duckdb.DuckDBPyConnection, path: Path) -> None:
+    try:
+        row = con.execute(
+            "SELECT value FROM metadata WHERE key = 'schema_version'"
+        ).fetchone()
+    except duckdb.Error as e:
+        raise RuntimeError(
+            f"Catalog at {path} is missing schema metadata. Run `quack reindex` "
+            "to rebuild it from source files and .index.yaml metadata."
+        ) from e
+    version = int(row[0]) if row else 0
+    if version != SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Catalog at {path} has schema version {version}, but quack expects "
+            f"{SCHEMA_VERSION}. Run `quack reindex` to rebuild it."
+        )
+
+
+def recover_message(path: Path) -> str:
+    return (
+        f"Catalog at {path} could not be opened. It is a derived artifact; "
+        "delete it or run `quack reindex` to rebuild it from source files and "
+        ".index.yaml metadata."
+    )
+
+
 def connect(explicit_root: str | None = None) -> duckdb.DuckDBPyConnection:
     """Open the catalog read-only for querying. Caller closes it."""
     space = Space.load(explicit_root)
@@ -132,7 +165,14 @@ def connect(explicit_root: str | None = None) -> duckdb.DuckDBPyConnection:
         raise RuntimeError(
             f"No catalog at {path}. Run `quack reindex` to build it."
         )
-    return duckdb.connect(str(path), read_only=True)
+    try:
+        con = duckdb.connect(str(path), read_only=True)
+        _validate_schema(con, path)
+        return con
+    except RuntimeError:
+        raise
+    except duckdb.Error as e:
+        raise RuntimeError(recover_message(path)) from e
 
 
 def query(sql: str, explicit_root: str | None = None) -> tuple[list[str], list[tuple]]:

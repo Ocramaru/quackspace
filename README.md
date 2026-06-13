@@ -26,26 +26,47 @@ quack mcp install         # connect an LLM (Claude Code, Kiro, …) over MCP
 Prefer Python packaging? `uv tool install quackspace` (or `pipx install
 quackspace`) does the same as the one-liner's second step.
 
-### Releasing
+### Releasing and beta builds
 
-Releases publish to PyPI via GitHub Actions + Trusted Publishing (no stored
-token). One-time: add a PyPI *pending publisher* (project `quackspace`, owner
-`Ocramaru`, repo `quackspace`, workflow `publish.yml`, environment `pypi`) and a
-GitHub environment named `pypi`. Then bump `version` in `pyproject.toml`, tag,
-and publish a GitHub Release — the workflow builds and uploads. Manual fallback:
-`uv build && uv publish --token <pypi-token>`.
+Quack uses uv-native packaging. CI runs `uv sync --locked --dev` and
+`uv run pytest tests`. Release and beta workflows use `uv build`, `uv version`,
+and `uv publish`, following Astral uv’s documented GitHub Actions flow.
+
+For a local beta wheel:
+
+```bash
+uv version --bump patch --bump dev=$(date -u +%Y%m%d%H%M) --no-sync
+uv build --wheel
+uv tool install --force dist/quackspace-*.whl
+```
+
+If the beta version should not stay in the checkout, restore or bump the version
+before merging. For mainline releases, set a stable version, tag it as `vX.Y.Z`,
+and push the tag. The `Publish release to PyPI` workflow builds, smoke-tests the
+wheel and sdist, then publishes with PyPI Trusted Publishing.
+
+One-time PyPI setup: add a trusted publisher for project `quackspace`, owner
+`Ocramaru`, repo `quackspace`, workflow `publish.yml`, environment `pypi`, and
+create the matching GitHub environment.
+
+For beta artifacts in GitHub, run the `Build beta wheel` workflow manually. It
+uses `uv version --bump patch --bump dev=${{ github.run_number }}`, builds a dev
+wheel, smoke-tests it, and uploads the wheel as an artifact. To push that dev
+build to TestPyPI, enable the workflow input and configure a matching TestPyPI
+trusted publisher/environment named `testpypi`.
 
 ## Architecture
 
+A **Quack Space** is the workspace root: the directory of files you want agents
+to navigate. The installed package provides the `quack` and `quack-mcp`
+commands; workspace-local state lives under `.quack/`.
+
 ```
-<your-root>/                ← any directory; quack finds it by the .quack/ marker
-├── .quack/                 ← the toolkit (and the root marker)
-│   ├── GUIDE.md            hand-written: how an AI should search the tree
+<your-root>/                ← the Quack Space; quack finds it by the .quack/ marker
+├── .quack/                 ← workspace-local state/config/index data
+│   ├── config.yaml         your AI assistant and embedding command choices
 │   ├── map.yaml            GENERATED: folder tree + folder descriptions
-│   ├── quack.duckdb        GENERATED: catalog (files, tags, links, FTS) — the queryable store
-│   ├── diagram.md          GENERATED: whole-graph Mermaid link diagram
-│   ├── config.yaml         your AI assistant choice
-│   └── src/quack/          the CLI + library
+│   └── quack.duckdb        GENERATED: catalog (files, tags, links, FTS) — the queryable store
 ├── .quackignore            optional: extra ignore patterns
 ├── QUACK.md                visible navigation anchor for LLMs
 ├── src/  docs/  notes/ …   ANY files: code, configs, markdown, assets
@@ -59,7 +80,8 @@ and publish a GitHub Release — the workflow builds and uploads. Manual fallbac
 MERGES it — preserving your text — and regenerates every map, catalog, and
 diagram from the files + `[[wikilinks]]`, so the navigation layer can never
 drift. The root can be named anything; quack locates it by walking up for
-`.quack/` (like git finds `.git`).
+`.quack/` (like git finds `.git`). Source code for the tool stays in the
+installed package or development checkout, not inside `.quack/`.
 
 ## The catalog (DuckDB)
 
@@ -111,11 +133,14 @@ quack embed            # build semantic embeddings (DuckDB vss)
 quack graph path|central|clusters # graph queries
 quack sql "SELECT ..." # query the catalog directly
 quack mcp install      # register the MCP server with clients
-quack where            # show root / toolkit / command paths
+quack agent kiro install # install Kiro agent hooks
+quack where            # show workspace / state / package / command paths
 ```
 
 Root resolution: `--root` > walk up for `.quack/` > `$QUACK_ROOT` >
-`$OBSIDIAN_VAULT` > the package location.
+`$OBSIDIAN_VAULT`. If none points to a directory containing `.quack/`, commands
+that need a Quack Space fail clearly and tell you to run `quack init` or pass
+`--root`.
 
 ## LLM access (MCP)
 
@@ -156,4 +181,4 @@ Run `quack reindex` after structural changes. To automate, wire it to one of:
 - Obsidian **Shell Commands** plugin (run on save),
 - a git **pre-commit** hook (`quack doctor --strict --files && quack reindex`),
 - a file-watcher,
-- `quack kiro install` (writes a Kiro reindex-on-save hook).
+- `quack agent kiro install` (writes a Kiro reindex-on-save hook).

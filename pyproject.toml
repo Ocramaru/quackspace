@@ -47,3 +47,8 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "quack"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]

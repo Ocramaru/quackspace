@@ -8,17 +8,20 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+htmlcov/
 
 # uv / virtualenv
 .venv/
 
-# quack runtime + generated artifacts (rebuilt by `quack reindex`; never shipped)
-quack.duckdb
-map.yaml
-diagram.md
-config.yaml
-.index.yaml
-_diagrams.md
+# Quack Space runtime + generated artifacts
+.quack/quack.duckdb
+.quack/quack.duckdb.*
+.quack/map.yaml
+.quack/diagram.md
+.quack/config.yaml
+.quack/.index.yaml
+.quack/_diagrams.md
 
 # OS
 .DS_Store

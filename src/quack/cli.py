@@ -10,7 +10,8 @@ quickly. Plays well with Obsidian but does not require it.
     quack generate [--stale] AI: fill in (or refresh) descriptions + tags
     quack doctor             report broken links + missing/stale descriptions
     quack new "Title" [-f folder] [-d description] [-t tag,tag]
-    quack where              show where the root, toolkit, and command live
+    quack where              show workspace, state, package, and command paths
+    quack agent kiro ...      agent integrations (Kiro, later others)
 
 All commands accept --root PATH (defaults to walking up for `.quack/`, then
 $QUACK_ROOT / $OBSIDIAN_VAULT).
@@ -37,6 +38,22 @@ from . import kiro as kiro_mod
 
 def _add_root_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument("--root", default=None, help="quack root (default: walk up for .quack/)")
+
+
+def _add_mcp_limit_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--search-limit", type=int, default=None, help="default MCP search result limit")
+    p.add_argument("--file-char-limit", type=int, default=None, help="default MCP get_file character limit")
+    p.add_argument("--sql-row-limit", type=int, default=None, help="default MCP SQL row limit")
+    p.add_argument("--central-limit", type=int, default=None, help="default MCP centrality result limit")
+
+
+def _mcp_limit_kwargs(args) -> dict:
+    return {
+        "search_limit": getattr(args, "search_limit", None),
+        "file_char_limit": getattr(args, "file_char_limit", None),
+        "sql_row_limit": getattr(args, "sql_row_limit", None),
+        "central_limit": getattr(args, "central_limit", None),
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-reindex", action="store_true", help="skip the reindex afterwards"
     )
 
-    p_where = sub.add_parser("where", help="show root, toolkit, and command paths")
+    p_where = sub.add_parser("where", help="show workspace, state, package, and command paths")
     _add_root_arg(p_where)
 
     p_setup = sub.add_parser("setup", help="choose the AI assistant interactively")
@@ -150,13 +167,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_mcp = sub.add_parser("mcp", help="MCP server for LLM tool access")
     mcp_sub = p_mcp.add_subparsers(dest="mcp_command", metavar="<subcommand>")
-    mcp_sub.add_parser("serve", help="run the server on stdio (clients launch this)")
+    p_mcp_serve = mcp_sub.add_parser("serve", help="run the server on stdio (clients launch this)")
+    _add_root_arg(p_mcp_serve)
+    _add_mcp_limit_args(p_mcp_serve)
     p_mcp_print = mcp_sub.add_parser("print", help="print the mcpServers JSON snippet")
     _add_root_arg(p_mcp_print)
+    _add_mcp_limit_args(p_mcp_print)
     p_mcp_install = mcp_sub.add_parser(
         "install", help="register the server with .mcp.json + installed clients"
     )
     _add_root_arg(p_mcp_install)
+    _add_mcp_limit_args(p_mcp_install)
     p_mcp_install.add_argument(
         "--yes", action="store_true", help="register global clients without prompting"
     )
@@ -173,14 +194,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--csv", action="store_true", help="output CSV instead of aligned columns"
     )
 
-    p_kiro = sub.add_parser("kiro", help="Kiro integration")
-    kiro_sub = p_kiro.add_subparsers(dest="kiro_command", metavar="<subcommand>")
-    p_kiro_install = kiro_sub.add_parser(
+    p_agent = sub.add_parser("agent", help="agent integrations")
+    agent_sub = p_agent.add_subparsers(dest="agent_provider", metavar="<provider>")
+    p_agent_kiro = agent_sub.add_parser("kiro", help="Kiro agent integration")
+    kiro_agent_sub = p_agent_kiro.add_subparsers(dest="agent_command", metavar="<subcommand>")
+    p_agent_kiro_install = kiro_agent_sub.add_parser(
         "install", help="write .kiro/hooks/*.kiro.hook files"
     )
-    _add_root_arg(p_kiro_install)
-    p_kiro_send = kiro_sub.add_parser("send", help="send a prompt to kiro-cli")
-    p_kiro_send.add_argument("prompt")
+    _add_root_arg(p_agent_kiro_install)
+    p_agent_kiro_send = kiro_agent_sub.add_parser("send", help="send a prompt to kiro-cli")
+    p_agent_kiro_send.add_argument("prompt")
 
     return parser
 
@@ -214,11 +237,11 @@ def _run_mcp(args) -> int:
     if cmd in (None, "serve"):
         from .mcp_server import main as mcp_main
 
-        mcp_main()
+        mcp_main([*(["--root", str(find_root(args.root))] if args.root else []), *mi.server_limit_args(**_mcp_limit_kwargs(args))])
         return 0
 
     if cmd == "print":
-        print(mi.mcp_json_snippet(args.root))
+        print(mi.mcp_json_snippet(args.root, **_mcp_limit_kwargs(args)))
         return 0
 
     if cmd == "status":
@@ -230,7 +253,8 @@ def _run_mcp(args) -> int:
         return 0
 
     if cmd == "install":
-        path = mi.write_project_config(args.root)
+        limit_kwargs = _mcp_limit_kwargs(args)
+        path = mi.write_project_config(args.root, **limit_kwargs)
         print(f"✓ wrote {path}")
         if args.project_only:
             return 0
@@ -238,7 +262,7 @@ def _run_mcp(args) -> int:
             if not client.installed:
                 print(f"  {client.label}: not installed, skipping")
                 continue
-            register = " ".join(mi.register_command(client.key, args.root))
+            register = " ".join(mi.register_command(client.key, args.root, **limit_kwargs))
             if not args.yes:
                 print(f"\n{client.label} is a global config change. Command:")
                 print(f"  {register}")
@@ -249,7 +273,7 @@ def _run_mcp(args) -> int:
                 if ans not in ("y", "yes"):
                     print("  skipped")
                     continue
-            ok, out = mi.run_register(client.key, args.root)
+            ok, out = mi.run_register(client.key, args.root, **limit_kwargs)
             print(f"  {'✓' if ok else '✗'} {client.label}: {out or ('registered' if ok else 'failed')}")
         return 0
 
@@ -280,6 +304,28 @@ def _run_graph(args) -> int:
             print(f"cluster {i} ({kind}): {', '.join(names)}")
         return 0
     print("usage: quack graph {path|central|clusters}")
+    return 1
+
+
+def _run_kiro(command: str | None, args) -> int:
+    if command == "install":
+        written = kiro_mod.install_hooks(args.root)
+        print(f"✓ installed {len(written)} Kiro hook(s):")
+        for p in written:
+            print(f"    {p}")
+        return 0
+    if command == "send":
+        print(kiro_mod.send(args.prompt))
+        return 0
+    print("usage: quack agent kiro {install|send}")
+    return 1
+
+
+def _run_agent(args) -> int:
+    provider = getattr(args, "agent_provider", None)
+    if provider == "kiro":
+        return _run_kiro(getattr(args, "agent_command", None), args)
+    print("usage: quack agent {kiro}")
     return 1
 
 
@@ -415,11 +461,12 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command == "where":
         root = find_root(args.root)
-        toolkit = Path(__file__).resolve().parents[2]  # .../<root>/.quack
+        package = Path(__file__).resolve().parents[2]
         print(f"root:     {root}")
-        print(f"toolkit:  {toolkit}")
+        print(f"state:    {root / '.quack'}")
+        print(f"package:  {package}")
         print(f"command:  {Path(sys.argv[0]).resolve()}")
-        print(f"guide:    {toolkit / 'GUIDE.md'}")
+        print(f"guide:    {root / 'QUACK.md'}")
         return 0
 
     if args.command == "search":
@@ -472,6 +519,9 @@ def _dispatch(argv: list[str] | None) -> int:
     if args.command == "graph":
         return _run_graph(args)
 
+    if args.command == "agent":
+        return _run_agent(args)
+
     if args.command == "embed":
         from .embed import EmbedNotConfigured, build_embeddings
 
@@ -512,19 +562,6 @@ def _dispatch(argv: list[str] | None) -> int:
                 print("No AI configured. Nothing generated.")
                 return 1
         return 0 if result else 1
-
-    if args.command == "kiro":
-        if args.kiro_command == "install":
-            written = kiro_mod.install_hooks(args.root)
-            print(f"✓ installed {len(written)} Kiro hook(s):")
-            for p in written:
-                print(f"    {p}")
-            return 0
-        if args.kiro_command == "send":
-            print(kiro_mod.send(args.prompt))
-            return 0
-        print("usage: quack kiro {install|send}")
-        return 1
 
     return 1
 

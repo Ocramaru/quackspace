@@ -7,8 +7,9 @@ import datetime as _dt
 from pathlib import Path
 
 import frontmatter
+import yaml
 
-from .core import find_root
+from .core import MARKER_DIR, find_root
 
 TEMPLATE_KEYS = ("description", "tags", "created", "updated")
 
@@ -79,7 +80,7 @@ quack graph path A B           # shortest link path
   `tags`; `links` derived from `[[wikilinks]]`). Markdown may also carry
   frontmatter. `quack reindex` merges it all into `.quack/quack.duckdb`.
 - Ignore patterns live in `.quackignore` at the root.
-- Full conventions and details: `.quack/GUIDE.md`.
+- Full conventions and details: `quack --help`, `quack mcp print`, and the project README.
 """
 
 ROOT_QUACKIGNORE = """# One pattern per line. Names or root-relative paths; globs allowed.
@@ -95,6 +96,34 @@ target
 """
 
 STARTER_FOLDERS = ("projects", "resources")
+
+
+def _inherited_defaults(root: Path) -> dict | None:
+    """Defaults inherit from the nearest parent quack space, if any."""
+    for parent in root.parents:
+        cfg = parent / MARKER_DIR / "config.yaml"
+        if not cfg.exists():
+            continue
+        try:
+            data = yaml.safe_load(cfg.read_text()) or {}
+        except yaml.YAMLError:
+            return None
+        defaults = data.get("defaults") if isinstance(data, dict) else None
+        return dict(defaults) if isinstance(defaults, dict) else None
+    return None
+
+
+def _merge_defaults(config_path: Path, defaults: dict | None) -> None:
+    if not defaults:
+        return
+    try:
+        data = yaml.safe_load(config_path.read_text()) or {}
+    except yaml.YAMLError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data["defaults"] = defaults
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
 
 def scaffold_root(target: str | None = None) -> Path:
@@ -123,7 +152,9 @@ def scaffold_root(target: str | None = None) -> Path:
     if not cfg.exists():
         from .config import write_config  # neutral default; `quack setup` picks
 
+        inherited = _inherited_defaults(root)
         write_config(command="", explicit_root=str(root))
+        _merge_defaults(cfg, inherited)
     return root
 
 

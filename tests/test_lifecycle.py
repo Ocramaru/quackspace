@@ -1,0 +1,115 @@
+from __future__ import annotations
+
+import json
+import yaml
+
+from conftest import arg_value, write_yaml
+from quack import catalog, diagram, graph, index_store
+from quack.core import Space
+from quack.doctor import diagnose, format_report
+from quack.generate import _parse_meta, record
+from quack.indexer import reindex
+from quack.scaffold import new_note, scaffold_root
+from quack.search import search
+
+
+def test_scaffold_new_note_reindex_catalog_search_graph_doctor_and_diagram(sample_space):
+    root = sample_space
+
+    created = new_note("Gamma Note", folder="projects", description="Gamma desc", tags=["gamma"], explicit_root=str(root))
+    assert created.parent == root / "projects"
+    assert created.name == "gamma-note.md"
+    assert created.read_text().startswith("---")
+
+    summary = reindex(str(root))
+    assert summary["files"] == 4
+    assert (root / ".quack" / "map.yaml").exists()
+    assert (root / ".quack" / "quack.duckdb").exists()
+    assert (root / "projects" / ".index.yaml").exists()
+
+    cols, rows = catalog.query("SELECT rel, description FROM files ORDER BY rel", explicit_root=str(root))
+    assert cols == ["rel", "description"]
+    rels = [row[0] for row in rows]
+    assert "projects/alpha.md" in rels
+    assert "projects/gamma-note.md" in rels
+
+    hits = search("regex", explicit_root=str(root), expand=False)
+    assert hits and hits[0].entry.rel == "projects/alpha.md"
+
+    assert graph.shortest_path("alpha", "beta", explicit_root=str(root)) == ["alpha", "beta"]
+    hubs = graph.centrality(explicit_root=str(root), limit=2)
+    assert hubs[0][0] in {"alpha", "beta"}
+    assert graph.components(explicit_root=str(root)) == [["alpha", "beta"]]
+
+    report = diagnose(str(root))
+    assert not report.ok
+    assert ("projects/alpha.md", "missing") in report.broken_links
+    assert "broken wikilink" in format_report(report)
+
+    result = diagram.diagram(str(root))
+    assert result["folder_diagrams"] == 1
+    assert (root / ".quack" / "diagram.md").exists()
+    assert (root / "projects" / "_diagrams.md").exists()
+
+
+def test_index_store_preserves_authored_fields_and_record_updates_metadata(sample_space):
+    root = sample_space
+    reindex(str(root))
+
+    rel = record(str(root), "beta", "Beta manual description", ["manual", "beta"] )
+    assert rel == "projects/beta.md"
+    reindex(str(root))
+
+    authored = index_store.load_authored(root / "projects")
+    assert authored["beta.md"]["description"] == "Beta manual description"
+    assert authored["beta.md"]["tags"] == ["manual", "beta"]
+
+    space = Space.load(str(root))
+    beta = next(e for e in space.entries if e.rel == "projects/beta.md")
+    assert beta.description == "Beta manual description"
+    assert beta.tags == ["manual", "beta"]
+
+
+def test_parse_meta_accepts_json_and_falls_back_to_text():
+    assert _parse_meta('{"description":"A file","tags":["Py", "CLI"]}') == ("A file", ["py", "cli"])
+    assert _parse_meta("just a sentence") == ("just a sentence", [])
+
+
+def test_mcp_json_contains_agent_launch_command_and_limit_flags(tmp_path):
+    from quack import mcp_install
+
+    root = scaffold_root(str(tmp_path / "space"))
+    path = mcp_install.write_project_config(
+        str(root),
+        search_limit=7,
+        file_char_limit=1234,
+        sql_row_limit=8,
+        central_limit=9,
+    )
+    data = json.loads(path.read_text())
+    entry = data["mcpServers"]["quack"]
+
+    assert "quack" in data["mcpServers"]
+    assert entry["command"]
+    assert arg_value(entry["args"], "--root") == str(root.resolve())
+    assert arg_value(entry["args"], "--search-limit") == "7"
+    assert arg_value(entry["args"], "--file-char-limit") == "1234"
+    assert arg_value(entry["args"], "--sql-row-limit") == "8"
+    assert arg_value(entry["args"], "--central-limit") == "9"
+
+
+def test_nested_scaffold_inherits_parent_defaults(tmp_path):
+    parent = scaffold_root(str(tmp_path / "parent"))
+    parent_config = parent / ".quack" / "config.yaml"
+    data = yaml.safe_load(parent_config.read_text())
+    data["defaults"]["search_limit"] = 4
+    data["defaults"]["file_char_limit"] = 123
+    data["defaults"]["sql_row_limit"] = 5
+    data["defaults"]["central_limit"] = 6
+    write_yaml(parent_config, data)
+
+    child = scaffold_root(str(parent / "projects" / "child"))
+    child_data = yaml.safe_load((child / ".quack" / "config.yaml").read_text())
+
+    assert child_data["defaults"] == data["defaults"]
+    assert child_data["ai"]["command"] == ""
