@@ -23,5 +23,10 @@ htmlcov/
 .quack/.index.yaml
 .quack/_diagrams.md
 
+# Quack Space generated metadata scattered through the tree (any depth)
+.index.yaml
+_diagrams.md
+QUACK.md
+
 # OS
 .DS_Store
