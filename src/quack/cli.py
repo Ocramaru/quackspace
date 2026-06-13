@@ -232,9 +232,9 @@ def _format_table(cols: list[str], rows: list[tuple], csv: bool = False) -> str:
 def _run_mcp(args) -> int:
     from . import mcp_install as mi
 
-    cmd = getattr(args, "mcp_command", None)
+    cmd = args.mcp_command
 
-    if cmd in (None, "serve"):
+    if cmd == "serve":
         from .mcp_server import main as mcp_main
 
         mcp_main([*(["--root", str(find_root(args.root))] if args.root else []), *mi.server_limit_args(**_mcp_limit_kwargs(args))])
@@ -382,12 +382,31 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
 
+def _incomplete_command(parser: argparse.ArgumentParser, args) -> argparse.ArgumentParser | None:
+    """Walk the chosen subcommand path. If a parser that expects a subcommand
+    was invoked without one (bare `quack`, `quack mcp`, `quack agent kiro`, …),
+    return it so the caller can show that parser's own help."""
+    current = parser
+    while True:
+        subparsers = next(
+            (a for a in current._actions if isinstance(a, argparse._SubParsersAction)),
+            None,
+        )
+        if subparsers is None:  # reached a real leaf command
+            return None
+        chosen = getattr(args, subparsers.dest, None)
+        if chosen is None:  # group invoked without picking a subcommand
+            return current
+        current = subparsers.choices[chosen]
+
+
 def _dispatch(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command is None:  # bare `quack` → show help instead of erroring
-        parser.print_help()
+    incomplete = _incomplete_command(parser, args)
+    if incomplete is not None:  # show the relevant help instead of erroring
+        incomplete.print_help()
         return 0
 
     if args.command == "reindex":
