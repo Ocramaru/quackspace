@@ -352,9 +352,16 @@ def _run_agent(args) -> int:
 
 def _run_generate(args) -> bool:
     """Run description generation and print results. Returns True on success."""
-    result = fill_descriptions(
-        args.root, only=args.only, dry_run=args.dry_run, include_stale=args.stale
-    )
+    from ._duck import swimming
+
+    with swimming("Generating descriptions") as progress:
+        result = fill_descriptions(
+            args.root,
+            only=args.only,
+            dry_run=args.dry_run,
+            include_stale=args.stale,
+            progress=progress.update,
+        )
     if args.dry_run:
         for line in result.updated:
             print(line)
