@@ -88,12 +88,14 @@ quack graph path A B           # shortest link path
 """
 
 ROOT_QUACKIGNORE = """# One pattern per line. Names or root-relative paths; globs allowed.
-# Built-ins (.quack, .obsidian, .git, .trash, node_modules) are always ignored.
-# Common build/dependency dirs for code projects (edit to taste):
-.venv
+# Handled automatically (no need to list):
+#   hidden entirely  — .quack, .git, .obsidian, .trash, and caches
+#                      (__pycache__, .mypy_cache, .pytest_cache, .ruff_cache)
+#   mentioned, not indexed — vendored/dependency trees (site-packages,
+#                      node_modules, .venv, venv, .tox, .eggs, bower_components)
+# Build outputs are project-specific; ignore the ones you have (edit to taste):
 dist
 build
-__pycache__
 target
 .next
 *.lock

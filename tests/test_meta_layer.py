@@ -253,6 +253,63 @@ def test_map_lists_all_nested_folders(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Opaque dirs: mentioned but not indexed — MAR-135
+# ---------------------------------------------------------------------------
+
+def test_opaque_dir_is_mentioned_but_not_indexed(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    sp = root / "libs" / "site-packages"
+    sp.mkdir(parents=True)
+    (sp / "huge_dep.py").write_text("x = 1\n")
+    (sp / "nested").mkdir()
+    (sp / "nested" / "more.py").write_text("y = 2\n")
+    (root / "libs" / "mine.py").write_text("z = 3\n")
+    reindex(str(root))
+
+    # The opaque folder is acknowledged, with a recognition description...
+    _, frows = catalog.query(
+        "SELECT folder, description FROM folders WHERE folder = 'libs/site-packages'",
+        explicit_root=str(root),
+    )
+    assert frows and frows[0][0] == "libs/site-packages"
+    assert frows[0][1]  # has a recognition description
+
+    # ...but nothing under it is indexed, and it is not descended into.
+    _, rows = catalog.query(
+        "SELECT count(*) FROM files WHERE rel LIKE 'libs/site-packages/%'",
+        explicit_root=str(root),
+    )
+    assert rows[0][0] == 0
+    _, deep = catalog.query(
+        "SELECT count(*) FROM folders WHERE folder LIKE 'libs/site-packages/%'",
+        explicit_root=str(root),
+    )
+    assert deep[0][0] == 0  # the 'nested' subfolder was never walked
+
+    # A sibling real file in the same parent is still indexed.
+    _, mine = catalog.query(
+        "SELECT count(*) FROM files WHERE rel = 'libs/mine.py'", explicit_root=str(root)
+    )
+    assert mine[0][0] == 1
+
+
+def test_cache_dirs_are_hidden_entirely(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    cache = root / "pkg" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "m.cpython-313.pyc").write_text("bytecode")
+    (root / "pkg" / "m.py").write_text("x = 1\n")
+    reindex(str(root))
+
+    # __pycache__ is not even mentioned as a folder.
+    _, rows = catalog.query(
+        "SELECT count(*) FROM folders WHERE folder LIKE 'pkg/__pycache__%'",
+        explicit_root=str(root),
+    )
+    assert rows[0][0] == 0
+
+
+# ---------------------------------------------------------------------------
 # catalog folders table + schema version — MAR-119
 # ---------------------------------------------------------------------------
 

@@ -21,9 +21,25 @@ import frontmatter
 # Marker directory that identifies a quack root (like .git for a repo).
 MARKER_DIR = ".quack"
 
-# Always-ignored dirs (quack state + common noise). Users extend this with a
-# `.quackignore` file at the root; these built-ins are never indexable.
-DEFAULT_IGNORED_DIRS = {".quack", ".obsidian", ".git", ".trash", "node_modules"}
+# Always-ignored dirs: quack state plus pure noise/derived caches. These are
+# never walked and never appear in the meta layer. Users extend this with a
+# `.quackignore` file at the root.
+DEFAULT_IGNORED_DIRS = {
+    ".quack", ".obsidian", ".git", ".trash",
+    "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".cache",
+}
+
+# Opaque dirs: heavy, unambiguous vendored/dependency/virtualenv trees. We
+# acknowledge the folder in the meta layer (so an LLM knows it exists) but never
+# descend into it — its files are not indexed, keeping the catalog focused on
+# the user's own work. Only names that are essentially never real content live
+# here; ambiguous build outputs (build/dist/target) are left to `.quackignore`
+# so quack never silently skips a user's own folder. A `.quackignore` match
+# still wins and hides a dir entirely.
+DEFAULT_OPAQUE_DIRS = {
+    "site-packages", "node_modules", "bower_components",
+    ".venv", "venv", "virtualenv", ".tox", ".eggs",
+}
 
 # quack's own generated/meta files that live alongside content but are not
 # content themselves, so they are never indexed as files.
@@ -274,13 +290,15 @@ def walk(root: Path, ignores: set[str] | None = None) -> tuple[list[Entry], list
     folders: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
-        dirnames[:] = [
-            d
-            for d in dirnames
-            if not _ignored(d, (base / d).relative_to(root).as_posix(), patterns)
-        ]
+        descend: list[str] = []
         for d in sorted(dirnames):
-            folders.append(base / d)
+            rel = (base / d).relative_to(root).as_posix()
+            if _ignored(d, rel, patterns):
+                continue  # fully hidden — not walked, not mentioned
+            folders.append(base / d)  # acknowledged in the meta layer
+            if d not in DEFAULT_OPAQUE_DIRS:
+                descend.append(d)  # opaque dirs are mentioned but not descended
+        dirnames[:] = descend
         for fn in filenames:
             rel = (base / fn).relative_to(root).as_posix()
             if fn in GENERATED_FILES or _ignored(fn, rel, patterns):

@@ -63,8 +63,11 @@ entire graph to find a few neighbours. Read cost scales with *relevance*.
   → that folder's `.folder.md` frontmatter → folder recognition default → blank.
   Author one by editing the parent's `directories:` section, or over MCP call
   `describe` then `reindex`.
-- Ignore patterns live in `.quackignore` at the root (built-ins like `.quack`,
-  `.git`, `node_modules` are always skipped).
+- Ignore patterns live in `.quackignore` at the root. Built-ins are automatic:
+  `.quack`/`.git`/`.obsidian`/`.trash` and caches (`__pycache__`, `.mypy_cache`,
+  …) are hidden entirely; vendored/dependency trees (`site-packages`,
+  `node_modules`, `.venv`, `.tox`, …) are **mentioned** as folders but their
+  contents are not indexed.
 - Author metadata by editing a folder's `.index.yaml`, or let the assistant
   classify it: `quack generate` writes a description + tags for every file
   missing one (`--stale` also refreshes ones whose file changed since).
