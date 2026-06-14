@@ -93,24 +93,30 @@ def test_recognition_is_lowest_precedence(tmp_path):
     assert guide.described_at != ""
 
 
-def test_frontmatter_description_suppresses_recognition_tags(tmp_path):
-    """A .md with a frontmatter description but no tags must NOT get generic
-    recognition tags; a plain .md with no frontmatter still does (C2)."""
+def test_prose_markdown_is_not_recognized_so_notes_stay_generatable(tmp_path):
+    """Prose extensions (.md/.txt) get no recognition default, so a note has a
+    blank description and `quack generate` will still describe it. Source files
+    keep their recognition default. Frontmatter still wins for a .md that has
+    one."""
     root = scaffold_root(str(tmp_path / "space"))
     (root / "notes").mkdir()
-    (root / "notes" / "described.md").write_text(
-        "---\ndescription: Hand-written note\n---\n# Note\n"
-    )
     (root / "notes" / "plain.md").write_text("# Plain\n\njust text\n")
+    (root / "notes" / "described.md").write_text(
+        "---\ndescription: Hand-written note\ntags: [topic]\n---\n# Note\n"
+    )
+    (root / "notes" / "mod.py").write_text("x = 1\n")
     space = Space.load(str(root))
     by_rel = {e.rel: e for e in space.entries}
 
-    described = by_rel["notes/described.md"]
-    assert described.description == "Hand-written note"
-    assert described.tags == []  # recognition tags suppressed
-
     plain = by_rel["notes/plain.md"]
-    assert plain.tags == ["docs", "markdown"]  # recognition default applies
+    assert plain.description == ""  # not recognized → generate-able
+    assert plain.tags == []
+
+    described = by_rel["notes/described.md"]
+    assert described.description == "Hand-written note"  # frontmatter wins
+    assert described.tags == ["topic"]
+
+    assert by_rel["notes/mod.py"].description == "Python source file."  # recognized
 
 
 def test_authored_beats_recognition_and_promotes(tmp_path):

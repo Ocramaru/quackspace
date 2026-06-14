@@ -375,7 +375,8 @@ def _run_generate(args) -> bool:
     if result.skipped:
         print(f"  skipped {len(result.skipped)} file(s) (no usable output)")
     if not args.dry_run and result.updated:
-        reindex(args.root)
+        with swimming("Reindexing") as progress:
+            reindex(args.root, progress=progress.update)
         print("  reindexed")
     return True
 
@@ -447,7 +448,10 @@ def _dispatch(argv: list[str] | None) -> int:
         return 0
 
     if args.command == "reindex":
-        summary = reindex(args.root)
+        from ._duck import swimming
+
+        with swimming("Reindexing") as progress:
+            summary = reindex(args.root, progress=progress.update)
         print(
             f"✓ reindexed {summary['files']} files across "
             f"{summary['folder_indexes']} folder(s)\n"
@@ -503,15 +507,17 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command == "describe":
         from . import generate
+        from ._duck import swimming
 
         tags = [t.strip() for t in args.tags.split(",") if t.strip()]
         rel = generate.record(args.root, args.path, args.description, tags)
         if rel is None:
-            print(f"✗ no indexed file matching {args.path!r}", file=sys.stderr)
+            print(f"✗ no indexed file or folder matching {args.path!r}", file=sys.stderr)
             return 1
         print(f"✓ described {rel}")
         if not args.no_reindex:
-            reindex(args.root)
+            with swimming("Reindexing") as progress:
+                reindex(args.root, progress=progress.update)
             print("  reindexed")
         return 0
 
@@ -595,10 +601,12 @@ def _dispatch(argv: list[str] | None) -> int:
         return _run_agent(args)
 
     if args.command == "embed":
+        from ._duck import swimming
         from .embed import EmbedNotConfigured, build_embeddings
 
         try:
-            result = build_embeddings(args.root)
+            with swimming("Embedding") as progress:
+                result = build_embeddings(args.root, progress=progress.update)
         except EmbedNotConfigured:
             print("No embedding command. Set `embed.command` in .quack/config.yaml,")
             print("then run `quack embed`. It must print a JSON array of floats.")
@@ -607,11 +615,13 @@ def _dispatch(argv: list[str] | None) -> int:
         return 0
 
     if args.command == "init":
+        from ._duck import swimming
         from .scaffold import scaffold_root
 
         root = scaffold_root(args.dir or args.root)
         print(f"✓ scaffolded space at {root}")
-        summary = reindex(str(root))
+        with swimming("Reindexing") as progress:
+            summary = reindex(str(root), progress=progress.update)
         print(f"  reindexed {summary['files']} file(s)")
         print("\nChoose an assistant to auto-write descriptions (optional):\n")
         run_setup(str(root))

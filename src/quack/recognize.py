@@ -66,9 +66,11 @@ EXTENSIONS: dict[str, tuple[str, list[str]]] = {
     "json": ("JSON data or configuration file.", ["config", "json"]),
     "ini": ("INI configuration file.", ["config", "ini"]),
     "cfg": ("Configuration file.", ["config"]),
-    "md": ("Markdown document.", ["docs", "markdown"]),
-    "rst": ("reStructuredText document.", ["docs"]),
-    "txt": ("Plain text file.", ["text"]),
+    # Prose extensions (md, rst, txt) are deliberately NOT recognized: their
+    # type says nothing about their content, and a generic default would make
+    # `quack generate` skip every note. They stay blank so generate/describe
+    # fill in real descriptions. (Known doc files like README.md are still
+    # recognized by exact name above.)
     "csv": ("Comma-separated tabular data.", ["data", "csv"]),
     "sql": ("SQL script.", ["sql", "database"]),
     "html": ("HTML document.", ["web", "html"]),

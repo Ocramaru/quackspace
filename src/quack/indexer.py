@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import yaml
 
@@ -285,8 +286,14 @@ def _dirty_folders(
     return None if d.full_rebuild else d.folders
 
 
-def reindex(explicit_root: str | None = None) -> dict:
+def reindex(
+    explicit_root: str | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> dict:
     """Regenerate all derived artifacts. Returns a summary.
+
+    *progress*, if given, is called as ``progress(done, total, message)`` at each
+    phase so a caller (the CLI) can drive a status animation.
 
     Incremental in three tiers, decided by diffing the loaded space against the
     stored catalog (see :func:`_compute_dirty`):
@@ -305,6 +312,11 @@ def reindex(explicit_root: str | None = None) -> dict:
     """
     from .gitignore import ensure_gitignore
 
+    def _tick(done: int, total: int, message: str) -> None:
+        if progress is not None:
+            progress(done, total, message)
+
+    _tick(0, 4, "Scanning files")
     space = Space.load(explicit_root)
     ensure_gitignore(space.root)
 
@@ -315,6 +327,7 @@ def reindex(explicit_root: str | None = None) -> dict:
 
     if d.nothing_to_do:
         # Nothing changed — return without touching any files.
+        _tick(4, 4, "Already up to date")
         return {
             "space": str(space.root),
             "files": len(space.entries),
@@ -326,16 +339,20 @@ def reindex(explicit_root: str | None = None) -> dict:
 
     # When only some folders are dirty, also refresh their ancestors, whose
     # directory rollups changed.
+    _tick(1, 4, f"Indexing {len(space.entries)} files")
     dirty = None if d.full_rebuild else _expand_dirty(d.folders, space.root)
     indexes = write_folder_indexes(space, folder_infos, dirty_folders=dirty)
+    _tick(2, 4, "Writing map")
     map_path = write_map(space, folder_infos)
 
+    _tick(3, 4, "Building catalog")
     if d.full_rebuild or d.need_full:
         cat = catalog.build(space, folder_infos)
         mode = "full"
     else:
         cat = catalog.update_light(space, folder_infos)
         mode = "light"
+    _tick(4, 4, "Done")
 
     return {
         "space": str(space.root),

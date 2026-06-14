@@ -16,6 +16,7 @@ import json
 import shlex
 import subprocess
 from collections import defaultdict
+from typing import Callable
 
 import duckdb
 
@@ -59,7 +60,10 @@ def _embed_text(cfg, text: str) -> list[float]:
     return [float(x) for x in vec]
 
 
-def build_embeddings(explicit_root: str | None = None) -> dict:
+def build_embeddings(
+    explicit_root: str | None = None,
+    progress: "Callable[[int, int, str], None] | None" = None,
+) -> dict:
     """Embed every file **and** every folder, storing vectors + HNSW indexes in
     the catalog. Files go in ``embeddings``; folders go in a **separate**
     ``folder_embeddings`` table (never reusing the file table, to avoid
@@ -101,11 +105,15 @@ def build_embeddings(explicit_root: str | None = None) -> dict:
         if not dim:
             raise RuntimeError("Could not determine embedding dimension.")
 
+        total = len(space.entries) + len(folder_items)
+
         con.execute("DROP TABLE IF EXISTS embeddings;")
         con.execute(
             f"CREATE TABLE embeddings (name VARCHAR, rel VARCHAR, vec FLOAT[{dim}]);"
         )
         for i, entry in enumerate(space.entries):
+            if progress is not None:
+                progress(i, total, f"Embedding {entry.rel}")
             vec = first if i == 0 else _embed_text(config.embed, _entry_text(entry))
             con.execute(
                 "INSERT INTO embeddings VALUES (?, ?, ?)", [entry.name, entry.rel, vec]
@@ -123,7 +131,9 @@ def build_embeddings(explicit_root: str | None = None) -> dict:
             "CREATE TABLE folder_embeddings "
             f"(folder VARCHAR, parent VARCHAR, vec FLOAT[{dim}]);"
         )
-        for rel, parent, text in folder_items:
+        for j, (rel, parent, text) in enumerate(folder_items):
+            if progress is not None:
+                progress(len(space.entries) + j, total, f"Embedding {rel}/")
             vec = _embed_text(config.embed, text)
             con.execute(
                 "INSERT INTO folder_embeddings VALUES (?, ?, ?)", [rel, parent, vec]
