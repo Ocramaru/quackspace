@@ -255,14 +255,25 @@ class Entry:
         return list(seen)
 
 
+def parse_frontmatter(text: str) -> "frontmatter.Post":
+    """Parse frontmatter from already-decoded text, never raising. Malformed
+    YAML frontmatter falls back to treating the whole text as the body (no
+    metadata), so one bad file can't break a reindex."""
+    try:
+        return frontmatter.loads(text)
+    except Exception:
+        return frontmatter.Post(content=text)
+
+
 def load_entry(path: Path, root: Path) -> Entry:
     """Load one file. Markdown is parsed for an optional frontmatter seed; any
     other file is read as text. Reads go through ``_read_text`` so a markdown
     file in a legacy encoding (or an undecodable/binary one) degrades instead of
-    raising — ``frontmatter`` is only handed already-decoded text."""
+    raising — ``frontmatter`` is only handed already-decoded text, and malformed
+    YAML frontmatter is tolerated (see ``parse_frontmatter``)."""
     body, is_binary = _read_text(path)
     if not is_binary and path.suffix.lower() == ".md":
-        post = frontmatter.loads(body)
+        post = parse_frontmatter(body)
         return Entry(path=path, root=root, body=post.content, _fm=post)
     return Entry(path=path, root=root, body=body, is_binary=is_binary)
 

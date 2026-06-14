@@ -46,13 +46,15 @@ class FolderInfo:
 
 
 def _folder_md_description(folder: Path) -> str:
-    """A folder's own ``.folder.md`` frontmatter description, or ''."""
+    """A folder's own ``.folder.md`` frontmatter description, or ''. Tolerates a
+    legacy encoding or malformed frontmatter rather than raising."""
     marker = folder / ".folder.md"
     if not marker.exists():
         return ""
-    import frontmatter
-
-    return str(frontmatter.load(marker).get("description", "")).strip()
+    body, is_binary = core._read_text(marker)
+    if is_binary:
+        return ""
+    return str(core.parse_frontmatter(body).get("description", "")).strip()
 
 
 def _resolve_description(
