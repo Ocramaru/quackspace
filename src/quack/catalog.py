@@ -392,3 +392,34 @@ def list_folders_path(db: Path) -> list[tuple[str, str, str]]:
         ).fetchall()
     finally:
         con.close()
+
+
+def search_docs_path(db: Path) -> list[tuple[str, str, str, str]]:
+    """The short fields structural search needs, straight from the catalog (no
+    filesystem walk, and crucially NOT the body column — body matching is the
+    FTS tier's job): [(name, rel, description, tags_csv), ...]."""
+    con = connect_path(db)
+    try:
+        return docs_on(con)
+    finally:
+        con.close()
+
+
+# Connection-based variants, so one search can open the catalog once and run the
+# docs/FTS/graph queries on a single connection instead of reopening it per tier.
+def docs_on(con: duckdb.DuckDBPyConnection) -> list[tuple[str, str, str, str]]:
+    return con.execute("SELECT name, rel, description, tags_csv FROM files").fetchall()
+
+
+def fts_on(
+    con: duckdb.DuckDBPyConnection, terms: str, limit: int = 10
+) -> list[tuple[str, str, float]]:
+    return _fts_query(con, terms, limit)
+
+
+def neighbours_on(
+    con: duckdb.DuckDBPyConnection, names: list[str], hops: int = 1
+) -> list[tuple[str, str, int, str]]:
+    if not names:
+        return []
+    return _neighbours_query(con, names, hops)

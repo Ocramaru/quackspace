@@ -1,17 +1,20 @@
 """Tiered local search over all files, the advantage `ls` can't give you.
 
-Two tiers, no model call and no embeddings:
+Tiers, fused with reciprocal rank fusion:
 
-  1. Structural: score every file on where the query terms hit, name, tags,
-     description, then body, with descending weight. This answers "what is
-     each file about?".
-  2. Graph expansion: pull in the wikilink neighbours of the top hits, so a
+  1. Structural: score files on where query terms hit the *short* fields —
+     name, tags, description — read straight from the catalog. Body matching is
+     deliberately NOT done here (it would mean pulling every file's full text
+     into Python on each query); that's the FTS tier's job.
+  2. FTS: DuckDB BM25 over name/description/body — the indexed way to match on
+     body text.
+  3. Semantic: DuckDB vss cosine, when embeddings exist.
+  4. Graph expansion: pull in the wikilink neighbours of the top hits, so a
      match surfaces what it is related to even if those neighbours did not
-     match the query themselves. This answers "what connects to what?".
+     match the query themselves.
 
-A semantic tier could slot in later behind the same interface (rank by an
-embedding command), but the LLM reading these results already matches on
-meaning, so structure + graph is the high-value, zero-dependency core.
+Everything reads the catalog snapshot, so search scales with relevance, not
+space size, and never walks the filesystem.
 """
 
 from __future__ import annotations
@@ -20,14 +23,14 @@ import re
 from dataclasses import dataclass, field
 
 from . import catalog
-from .core import Entry, Space, find_root
+from .core import Space, find_root
 from .catalog import DB_NAME
 
-# Field weights: a hit in the name matters more than one buried in the body.
+# Field weights for the structural tier (short fields only; body is the FTS
+# tier's domain). A hit in the name matters more than one in the description.
 WEIGHT_NAME = 10
 WEIGHT_TAG = 6
 WEIGHT_DESCRIPTION = 4
-WEIGHT_BODY = 1
 
 # Reciprocal-rank-fusion constant. Each tier contributes 1/(RRF_K + rank);
 # k flattens the contribution of low ranks so no single tier dominates.
@@ -35,8 +38,19 @@ RRF_K = 60
 
 
 @dataclass
+class Doc:
+    """The lightweight file record search returns — sourced from the catalog,
+    not a full filesystem load. Exposes the fields callers read off a hit."""
+
+    rel: str
+    name: str
+    description: str
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass
 class Hit:
-    entry: Entry
+    entry: Doc
     score: float
     reasons: list[str] = field(default_factory=list)
     via: list[str] = field(default_factory=list)  # neighbour-of which file names
@@ -92,41 +106,44 @@ def _terms(query: str) -> list[str]:
     return [t for t in re.split(r"\s+", query.lower().strip()) if t]
 
 
-def _score_entry(entry: Entry, terms: list[str]) -> tuple[float, list[str]]:
+def _score_row(
+    name: str, description: str, tags_csv: str, terms: list[str]
+) -> tuple[float, list[str]]:
     score = 0.0
     reasons: list[str] = []
     # Lowercase once; terms are already lowercase from _terms().
-    body = entry.body.lower()
-    tags_joined = " ".join(entry.tags).lower()
-    desc = entry.description.lower()
-    name = entry.name.lower()
+    name_l = name.lower()
+    tags_l = (tags_csv or "").lower()
+    desc_l = (description or "").lower()
 
     for term in terms:
-        if term in name:
+        if term in name_l:
             score += WEIGHT_NAME
             reasons.append(f"name~{term}")
-        if term in tags_joined:
+        if term in tags_l:
             score += WEIGHT_TAG
             reasons.append(f"tag~{term}")
-        if term in desc:
+        if term in desc_l:
             score += WEIGHT_DESCRIPTION
             reasons.append(f"desc~{term}")
-        n = body.count(term)
-        if n:
-            score += WEIGHT_BODY * n
-            reasons.append(f"body~{term}x{n}")
     return score, reasons
 
 
-def _structural_ranking(space: Space, terms: list[str]) -> list[tuple[str, list[str]]]:
-    """Files ranked by weighted field match. Returns [(name, reasons), ...]."""
-    scored = []
-    for entry in space.entries:
-        score, reasons = _score_entry(entry, terms)
-        if score > 0:
-            scored.append((score, entry.name, reasons))
-    scored.sort(key=lambda t: -t[0])
-    return [(name, reasons) for _, name, reasons in scored]
+def _open_corpus(explicit_root: str | None):
+    """Return (rows, con) for a search.
+
+    Opens the catalog **once** and reads the short structural fields; the same
+    connection is reused for the FTS and graph tiers (no reopening per tier).
+    Falls back to a filesystem load with no connection only when there is no
+    usable catalog yet, so search still works before the first reindex."""
+    db = find_root(explicit_root) / ".quack" / DB_NAME
+    try:
+        con = catalog.connect_path(db)
+        return catalog.docs_on(con), con
+    except Exception:
+        space = Space.load(explicit_root)
+        rows = [(e.name, e.rel, e.description, ",".join(e.tags)) for e in space.entries]
+        return rows, None
 
 
 def search(
@@ -142,78 +159,95 @@ def search(
     LLM never chooses a mode; results are merged with reciprocal rank fusion so
     exact matches (structural/FTS) and conceptual matches (semantic) blend
     sensibly. Graph expansion then pulls in neighbours of the top hits.
+
+    All tiers read the catalog snapshot — search no longer loads the filesystem
+    on every call, so it scales with relevance, not space size.
     """
-    space = Space.load(explicit_root)
     terms = _terms(query)
     if not terms:
         return []
 
-    # Pre-compute the catalog path once; both FTS and graph expansion use it
-    # so we never call Space.load() again through catalog.connect().
-    db = catalog.db_path(space)
-
-    fused: dict[str, float] = {}
-    reasons_by_name: dict[str, list[str]] = {}
-    tiers_by_name: dict[str, list[str]] = {}
-
-    def add_tier(tier: str, ranked_names: list[str]) -> None:
-        for rank, name in enumerate(ranked_names):
-            fused[name] = fused.get(name, 0.0) + 1.0 / (RRF_K + rank)
-            tiers_by_name.setdefault(name, [])
-            if tier not in tiers_by_name[name]:
-                tiers_by_name[name].append(tier)
-
-    # Tier 1: structural (always available).
-    structural = _structural_ranking(space, terms)
-    add_tier("structural", [name for name, _ in structural])
-    for name, reasons in structural:
-        reasons_by_name[name] = reasons
-
-    # Tier 2: FTS via DuckDB. Uses the pre-computed db path — no extra Space.load().
+    rows, con = _open_corpus(explicit_root)
     try:
-        fts = catalog.fts_search_path(db, query, limit=max(limit * 2, 20))
-        # by_rel gives O(1) lookup; fall back to rel string if not found.
-        add_tier("fts", [
-            e.name if (e := space.by_rel.get(rel)) is not None else rel
-            for rel, _desc, _score in fts
-        ])
-    except Exception:
-        pass
+        doc_by_name: dict[str, Doc] = {}
+        name_by_rel: dict[str, str] = {}
+        for name, rel, desc, tags_csv in rows:
+            doc_by_name[name] = Doc(
+                rel=rel,
+                name=name,
+                description=desc or "",
+                tags=[t for t in (tags_csv or "").split(",") if t],
+            )
+            name_by_rel[rel] = name
 
-    # Tier 3: semantic via vss (skip silently if not configured/built).
-    try:
-        from . import embed
-        sem = embed.semantic_search(query, explicit_root, limit=max(limit * 2, 20))
-        add_tier("semantic", [name for _rel, name, _dist in sem])
-    except Exception:
-        pass
+        fused: dict[str, float] = {}
+        reasons_by_name: dict[str, list[str]] = {}
+        tiers_by_name: dict[str, list[str]] = {}
 
-    hits: dict[str, Hit] = {}
-    for name, score in fused.items():
-        entry = space.by_name.get(name)
-        if entry is None:
-            continue
-        hits[name] = Hit(
-            entry=entry,
-            score=score,
-            reasons=reasons_by_name.get(name, []),
-            tiers=tiers_by_name.get(name, []),
-        )
+        def add_tier(tier: str, ranked_names: list[str]) -> None:
+            for rank, name in enumerate(ranked_names):
+                fused[name] = fused.get(name, 0.0) + 1.0 / (RRF_K + rank)
+                tiers_by_name.setdefault(name, [])
+                if tier not in tiers_by_name[name]:
+                    tiers_by_name[name].append(tier)
 
-    # Graph expansion: neighbours of the matches, scored below any direct hit.
-    if expand and hits:
-        seeds = list(hits)
+        # Tier 1: structural (always available), scored over the short catalog
+        # fields. Body matches come from the FTS tier below.
+        scored: list[tuple[float, str, list[str]]] = []
+        for name, _rel, desc, tags_csv in rows:
+            s, reasons = _score_row(name, desc, tags_csv, terms)
+            if s > 0:
+                scored.append((s, name, reasons))
+        scored.sort(key=lambda t: -t[0])
+        add_tier("structural", [name for _s, name, _r in scored])
+        for _s, name, reasons in scored:
+            reasons_by_name[name] = reasons
+
+        # Tier 2: FTS — on the same connection (None only before first reindex).
+        if con is not None:
+            try:
+                fts = catalog.fts_on(con, query, limit=max(limit * 2, 20))
+                add_tier("fts", [name_by_rel.get(rel, rel) for rel, _d, _s in fts])
+            except Exception:
+                pass
+
+        # Tier 3: semantic via vss (skip silently if not configured/built).
         try:
-            neigh = catalog.neighbours_path(db, seeds, hops=1)
+            from . import embed
+            sem = embed.semantic_search(query, explicit_root, limit=max(limit * 2, 20))
+            add_tier("semantic", [name for _rel, name, _dist in sem])
         except Exception:
-            neigh = []
-        for name, rel, dist, via_seed in neigh:
-            if name in hits:
+            pass
+
+        hits: dict[str, Hit] = {}
+        for name, score in fused.items():
+            doc = doc_by_name.get(name)
+            if doc is None:
                 continue
-            target = space.by_name.get(name)
-            if target is None:
-                continue
-            hits[name] = Hit(entry=target, score=0.0, reasons=[], via=[via_seed])
+            hits[name] = Hit(
+                entry=doc,
+                score=score,
+                reasons=reasons_by_name.get(name, []),
+                tiers=tiers_by_name.get(name, []),
+            )
+
+        # Graph expansion: neighbours of the matches, on the same connection.
+        if expand and hits and con is not None:
+            seeds = list(hits)
+            try:
+                neigh = catalog.neighbours_on(con, seeds, hops=1)
+            except Exception:
+                neigh = []
+            for name, rel, dist, via_seed in neigh:
+                if name in hits:
+                    continue
+                doc = doc_by_name.get(name)
+                if doc is None:
+                    continue
+                hits[name] = Hit(entry=doc, score=0.0, reasons=[], via=[via_seed])
+    finally:
+        if con is not None:
+            con.close()
 
     ranked = sorted(hits.values(), key=lambda h: (-h.score, h.entry.rel))
     return ranked[:limit]

@@ -335,9 +335,10 @@ def _load_entries(
 
     from concurrent.futures import ThreadPoolExecutor
 
-    workers = min(32, (os.cpu_count() or 4) * 4)
+    # No max_workers: ThreadPoolExecutor sizes the pool from the machine
+    # (min(32, os.cpu_count() + 4)), so we don't hand-roll resource decisions.
     entries = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with ThreadPoolExecutor() as pool:
         for e in pool.map(lambda p: load_entry(p, root), file_paths):
             entries.append(e)
             if on_file is not None:
