@@ -101,3 +101,33 @@ def ensure_gitignore(quack_root: Path) -> None:
     else:
         sep = "\n" if content and not content.endswith("\n") else ""
         gitignore_path.write_text(content + sep + block)
+
+
+def remove_gitignore(quack_root: Path) -> bool:
+    """Strip the quack-managed block from the nearest git repo's .gitignore,
+    leaving the user's own lines intact. Returns True if a block was removed."""
+    git_root = _find_git_root(quack_root)
+    if git_root is None:
+        return False
+    gitignore_path = git_root / ".gitignore"
+    if not gitignore_path.exists():
+        return False
+    content = gitignore_path.read_text()
+    if BLOCK_START not in content:
+        return False
+    start = content.index(BLOCK_START)
+    end_marker = content.find(BLOCK_END, start)
+    if end_marker == -1:
+        new_content = content[:start]
+    else:
+        end = end_marker + len(BLOCK_END)
+        if end < len(content) and content[end] == "\n":
+            end += 1
+        new_content = content[:start] + content[end:]
+    # Tidy a trailing blank left where the block was.
+    new_content = new_content.rstrip("\n") + "\n" if new_content.strip() else ""
+    if new_content:
+        gitignore_path.write_text(new_content)
+    else:
+        gitignore_path.unlink()
+    return True

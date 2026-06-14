@@ -312,12 +312,15 @@ def reindex(
     """
     from .gitignore import ensure_gitignore
 
-    def _tick(done: int, total: int, message: str) -> None:
-        if progress is not None:
-            progress(done, total, message)
+    # Space.load drives the per-file scan progress (a real [done/total] bar);
+    # the cheap phases after it just update the message at a full bar.
+    space = Space.load(explicit_root, progress=progress)
+    total = max(len(space.entries), 1)
 
-    _tick(0, 4, "Scanning files")
-    space = Space.load(explicit_root)
+    def _tick(message: str) -> None:
+        if progress is not None:
+            progress(total, total, message)
+
     ensure_gitignore(space.root)
 
     # Resolve folder metadata once and feed it to every consumer (dirty
@@ -327,7 +330,7 @@ def reindex(
 
     if d.nothing_to_do:
         # Nothing changed — return without touching any files.
-        _tick(4, 4, "Already up to date")
+        _tick("Already up to date")
         return {
             "space": str(space.root),
             "files": len(space.entries),
@@ -339,20 +342,20 @@ def reindex(
 
     # When only some folders are dirty, also refresh their ancestors, whose
     # directory rollups changed.
-    _tick(1, 4, f"Indexing {len(space.entries)} files")
+    _tick("Writing folder indexes")
     dirty = None if d.full_rebuild else _expand_dirty(d.folders, space.root)
     indexes = write_folder_indexes(space, folder_infos, dirty_folders=dirty)
-    _tick(2, 4, "Writing map")
+    _tick("Writing map")
     map_path = write_map(space, folder_infos)
 
-    _tick(3, 4, "Building catalog")
+    _tick("Building catalog")
     if d.full_rebuild or d.need_full:
         cat = catalog.build(space, folder_infos)
         mode = "full"
     else:
         cat = catalog.update_light(space, folder_infos)
         mode = "light"
-    _tick(4, 4, "Done")
+    _tick("Done")
 
     return {
         "space": str(space.root),

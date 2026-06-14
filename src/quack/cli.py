@@ -97,6 +97,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_diagram = sub.add_parser("diagram", help="regenerate Mermaid link diagrams only")
     _add_root_arg(p_diagram)
 
+    p_clean = sub.add_parser(
+        "clean", help="remove generated artifacts (catalog/map/diagrams)"
+    )
+    _add_root_arg(p_clean)
+    p_clean.add_argument(
+        "--all",
+        dest="purge",
+        action="store_true",
+        help="fully uninstall quack: also remove .index.yaml, QUACK.md, .quack/",
+    )
+    p_clean.add_argument(
+        "--yes", action="store_true", help="skip the confirmation prompt for --all"
+    )
+
     p_doctor = sub.add_parser("doctor", help="health-check the root (files + MCP)")
     _add_root_arg(p_doctor)
     p_doctor.add_argument(
@@ -466,6 +480,35 @@ def _dispatch(argv: list[str] | None) -> int:
     if args.command == "diagram":
         d = diagram(args.root)
         print(f"✓ wrote {d['folder_diagrams']} folder diagram(s)\n  global: {d['global']}")
+        return 0
+
+    if args.command == "clean":
+        from .clean import clean
+
+        if args.purge and not args.yes:
+            print(
+                "✗ `quack clean --all` fully uninstalls quack and DELETES authored\n"
+                "  .index.yaml descriptions, QUACK.md, and .quack/. This cannot be\n"
+                "  undone. Re-run with --yes to confirm.",
+                file=sys.stderr,
+            )
+            return 1
+        removed = clean(args.root, purge=args.purge)
+        if args.purge:
+            print(
+                f"✓ uninstalled quack: removed {removed['indexes']} index file(s), "
+                f"{removed['diagrams']} diagram(s), and the .quack/ layer"
+            )
+        else:
+            print(
+                f"✓ cleaned derived artifacts: catalog, map, "
+                f"{removed['diagrams']} diagram(s). Run `quack reindex` to rebuild."
+            )
+        if removed.get("extras"):
+            print(
+                f"  (also removed {removed['extras']} stray artifact(s) found by scan "
+                "that the catalog didn't list)"
+            )
         return 0
 
     if args.command == "doctor":

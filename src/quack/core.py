@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
 from pathlib import Path
+from typing import Callable
 
 import frontmatter
 
@@ -118,17 +119,18 @@ def find_root(explicit: str | None = None) -> Path:
 
 def _read_text(path: Path) -> tuple[str, bool]:
     """Return (body, is_binary). Files containing NUL bytes are treated as
-    binary and yield an empty body. Oversize files are truncated to the first
-    TEXT_BODY_MAX_BYTES for the index. Content that isn't valid UTF-8 but has no
-    NUL bytes is almost certainly text in a legacy encoding (e.g. Windows-1252
-    smart quotes), so it is decoded leniently rather than dropped or raised."""
+    binary and yield an empty body. Only the first TEXT_BODY_MAX_BYTES are read
+    (not the whole file, then truncated) so a huge log/asset doesn't slow the
+    scan. Content that isn't valid UTF-8 but has no NUL bytes is almost
+    certainly text in a legacy encoding (e.g. Windows-1252 smart quotes), so it
+    is decoded leniently rather than dropped or raised."""
     try:
-        data = path.read_bytes()
+        with path.open("rb") as f:
+            chunk = f.read(TEXT_BODY_MAX_BYTES)
     except OSError:
         return "", False
-    if b"\x00" in data[:1024]:
+    if b"\x00" in chunk[:1024]:
         return "", True
-    chunk = data[:TEXT_BODY_MAX_BYTES]
     try:
         return chunk.decode("utf-8"), False
     except UnicodeDecodeError:
@@ -288,34 +290,104 @@ def _ignored(name: str, rel: str, patterns: set[str]) -> bool:
     return False
 
 
-def walk(root: Path, ignores: set[str] | None = None) -> tuple[list[Entry], list[Path]]:
+def _level(base: Path, dirnames: list[str], root: Path, patterns: set[str]):
+    """One os.walk level → (folders_to_record, dirs_to_descend). Shared by
+    :func:`walk` and :func:`count_indexable` so pruning can't diverge: ignored
+    dirs are hidden; opaque dirs are recorded as folders but not descended."""
+    record: list[Path] = []
+    descend: list[str] = []
+    for d in sorted(dirnames):
+        rel = (base / d).relative_to(root).as_posix()
+        if _ignored(d, rel, patterns):
+            continue
+        record.append(base / d)
+        if d not in DEFAULT_OPAQUE_DIRS:
+            descend.append(d)
+    return record, descend
+
+
+def _keep_file(fn: str, rel: str, patterns: set[str]) -> bool:
+    """True if a file should be indexed (not a generated artifact / not ignored)."""
+    return not (fn in GENERATED_FILES or _ignored(fn, rel, patterns))
+
+
+# Below this many files, the thread-pool overhead isn't worth it; load inline.
+_PARALLEL_MIN_FILES = 64
+
+
+def _load_entries(
+    file_paths: list[Path],
+    root: Path,
+    on_file: "Callable[[Entry], None] | None",
+) -> list[Entry]:
+    """Load entries from *file_paths*. Reading file bodies is I/O-bound (the GIL
+    is released during reads), so for many files we load them on a thread pool;
+    ``ThreadPoolExecutor.map`` preserves order, so ``on_file`` still fires in a
+    stable sequence for progress reporting."""
+    if len(file_paths) < _PARALLEL_MIN_FILES:
+        entries: list[Entry] = []
+        for p in file_paths:
+            e = load_entry(p, root)
+            entries.append(e)
+            if on_file is not None:
+                on_file(e)
+        return entries
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    workers = min(32, (os.cpu_count() or 4) * 4)
+    entries = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for e in pool.map(lambda p: load_entry(p, root), file_paths):
+            entries.append(e)
+            if on_file is not None:
+                on_file(e)
+    return entries
+
+
+def walk(
+    root: Path,
+    ignores: set[str] | None = None,
+    on_file: "Callable[[Entry], None] | None" = None,
+) -> tuple[list[Entry], list[Path]]:
     """One filesystem pass → (entries, folders).
 
     ``entries`` is every non-ignored file (loaded), skipping quack's own
     generated artifacts. ``folders`` is every non-ignored folder under *root*
     (excluding root itself), including folders that contain only subfolders, so
-    the per-folder meta layer can cover the whole tree. Both come from a single
-    ``os.walk`` so callers never traverse twice."""
+    the per-folder meta layer can cover the whole tree. Directory traversal is a
+    single ``os.walk``; the (slower, I/O-bound) file loading is parallelized.
+    *on_file*, if given, is called with each loaded entry (drives progress)."""
     patterns = ignores if ignores is not None else load_ignores(root)
-    entries: list[Entry] = []
+    file_paths: list[Path] = []
     folders: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
-        descend: list[str] = []
-        for d in sorted(dirnames):
-            rel = (base / d).relative_to(root).as_posix()
-            if _ignored(d, rel, patterns):
-                continue  # fully hidden — not walked, not mentioned
-            folders.append(base / d)  # acknowledged in the meta layer
-            if d not in DEFAULT_OPAQUE_DIRS:
-                descend.append(d)  # opaque dirs are mentioned but not descended
+        record, descend = _level(base, dirnames, root, patterns)
+        folders.extend(record)
         dirnames[:] = descend
         for fn in filenames:
             rel = (base / fn).relative_to(root).as_posix()
-            if fn in GENERATED_FILES or _ignored(fn, rel, patterns):
-                continue
-            entries.append(load_entry(base / fn, root))
+            if _keep_file(fn, rel, patterns):
+                file_paths.append(base / fn)
+    entries = _load_entries(file_paths, root, on_file)
     return entries, folders
+
+
+def count_indexable(root: Path, ignores: set[str] | None = None) -> int:
+    """Count the files :func:`walk` would index, without reading any of them.
+    Cheap (stat/scandir only); used to get a total up front for a progress bar."""
+    patterns = ignores if ignores is not None else load_ignores(root)
+    n = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        _record, descend = _level(base, dirnames, root, patterns)
+        dirnames[:] = descend
+        for fn in filenames:
+            rel = (base / fn).relative_to(root).as_posix()
+            if _keep_file(fn, rel, patterns):
+                n += 1
+    return n
 
 
 def iter_files(root: Path, ignores: set[str] | None = None):
@@ -342,9 +414,26 @@ class Space:
     folders: list[Path] = field(default_factory=list)
 
     @classmethod
-    def load(cls, explicit: str | None = None) -> "Space":
+    def load(
+        cls,
+        explicit: str | None = None,
+        progress: "Callable[[int, int, str], None] | None" = None,
+    ) -> "Space":
+        """Load every file with effective metadata. *progress*, if given, is
+        called as ``progress(done, total, message)`` per file during the scan —
+        it triggers a cheap up-front count so a real total is known. Callers
+        that don't need progress (search, embed, doctor) pay no extra walk."""
         root = find_root(explicit)
-        entries, folders = walk(root)
+        on_file = None
+        if progress is not None:
+            total = count_indexable(root)
+            seen = {"n": 0}
+
+            def on_file(entry: Entry) -> None:
+                seen["n"] += 1
+                progress(seen["n"], total, f"Scanning {entry.rel}")
+
+        entries, folders = walk(root, on_file=on_file)
         _overlay(root, entries)
         return cls(root=root, entries=entries, folders=folders)
 
