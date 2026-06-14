@@ -81,6 +81,17 @@ def test_clean_derived_via_cli(tmp_path):
     assert (root / ".quack" / "config.yaml").exists()
 
 
+def test_clean_all_removes_mcp_registration(tmp_path):
+    from quack import mcp_install
+
+    root = _space(tmp_path)
+    mcp_install.write_project_config(str(root))
+    assert (root / ".mcp.json").exists()
+
+    clean(str(root), purge=True)
+    assert not (root / ".mcp.json").exists()
+
+
 def test_clean_catches_stragglers_not_in_catalog(tmp_path):
     """A _diagrams.md in a folder the catalog never indexed is still found and
     removed by the disk-scan catch-all, and reported as an extra."""

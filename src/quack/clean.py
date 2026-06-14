@@ -95,11 +95,19 @@ def clean(explicit_root: str | None = None, purge: bool = False) -> dict:
 
     if purge:
         from .gitignore import remove_gitignore
+        from .kiro import hook_definitions
 
-        for name in ("QUACK.md", ".quackignore"):
+        for name in ("QUACK.md", ".quackignore", ".mcp.json"):
             p = root / name
             if p.exists():
                 p.unlink()
+                removed["other"] += 1
+        # Remove only quack's own Kiro hooks, never the user's .kiro/ config.
+        hooks_dir = root / ".kiro" / "hooks"
+        for slug in hook_definitions():
+            hook = hooks_dir / f"{slug}.kiro.hook"
+            if hook.exists():
+                hook.unlink()
                 removed["other"] += 1
         if remove_gitignore(root):
             removed["other"] += 1
