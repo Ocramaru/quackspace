@@ -145,6 +145,34 @@ def test_reindex_survives_malformed_frontmatter(sample_space):
     assert "real content" in rows[0][1]
 
 
+def test_reindex_can_disable_body_storage(sample_space):
+    root = sample_space
+    token = "privatebodytoken"
+    (root / "projects" / "private.md").write_text(f"# Private\n\n{token}\n")
+    reindex(str(root))
+
+    _, rows = catalog.query(
+        "SELECT body FROM files WHERE rel = 'projects/private.md'",
+        explicit_root=str(root),
+    )
+    assert token in rows[0][0]
+    assert search(token, explicit_root=str(root), expand=False)
+
+    config = yaml.safe_load((root / ".quack" / "config.yaml").read_text())
+    config["index"] = {"store_body": False}
+    write_yaml(root / ".quack" / "config.yaml", config)
+
+    summary = reindex(str(root))
+
+    assert summary["catalog"] == "full"
+    _, rows = catalog.query(
+        "SELECT body FROM files WHERE rel = 'projects/private.md'",
+        explicit_root=str(root),
+    )
+    assert rows[0][0] == ""
+    assert search(token, explicit_root=str(root), expand=False) == []
+
+
 def test_parse_meta_accepts_json_and_falls_back_to_text():
     assert _parse_meta('{"description":"A file","tags":["Py", "CLI"]}') == ("A file", ["py", "cli"])
     assert _parse_meta("just a sentence") == ("just a sentence", [])

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import catalog, folders, index_store
+from .config import Config
 from .folders import FolderInfo
 from .core import Space, find_root, scan_signature
 
@@ -283,7 +284,10 @@ def _dirty_folders(
 
 
 def _fast_noop(
-    root: Path, progress: Callable[[int, int, str], None] | None = None
+    root: Path,
+    *,
+    store_body: bool,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> dict | None:
     """Return the no-op reindex summary if a stat-only check proves nothing
     changed since the last build, else None. Conservative: any uncertainty
@@ -291,6 +295,8 @@ def _fast_noop(
     returns None so the accurate full path runs. Never reports a false no-op."""
     db = root / ".quack" / catalog.DB_NAME
     if not db.exists():
+        return None
+    if not catalog.store_body_matches(db, store_body):
         return None
     try:
         con = catalog.connect_path(db)
@@ -371,7 +377,11 @@ def reindex(
     # nothing has changed (the common reindex). Conservative — any doubt falls
     # through to the accurate full path below.
     root = find_root(explicit_root)
-    noop = _fast_noop(root, progress=progress)
+    config = Config.load(str(root))
+    store_body = config.index.store_body
+    catalog_path = root / ".quack" / catalog.DB_NAME
+    catalog_mode_changed = not catalog.store_body_matches(catalog_path, store_body)
+    noop = _fast_noop(root, store_body=store_body, progress=progress)
     if noop is not None:
         ensure_gitignore(root)
         return noop
@@ -392,7 +402,7 @@ def reindex(
     folder_infos = folders.resolve_folders(space)
     d = _compute_dirty(space, folder_infos)
 
-    if d.nothing_to_do:
+    if d.nothing_to_do and not catalog_mode_changed:
         # Nothing changed — return without touching any files.
         _tick("Already up to date")
         return {
@@ -413,8 +423,8 @@ def reindex(
     map_path = write_map(space, folder_infos)
 
     _tick("Building catalog")
-    if d.full_rebuild or d.need_full:
-        cat = catalog.build(space, folder_infos)
+    if d.full_rebuild or d.need_full or catalog_mode_changed:
+        cat = catalog.build(space, folder_infos, store_body=store_body)
         mode = "full"
     else:
         cat = catalog.update_light(space, folder_infos)

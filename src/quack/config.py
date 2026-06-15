@@ -12,6 +12,9 @@ config.yaml shape:
       command: kiro-cli chat --no-interactive --trust-all-tools "{prompt}"
       timeout: 120        # seconds
 
+    index:
+      store_body: true     # set false to keep file text out of DuckDB
+
 When no command is set, the AI is "not configured": `quack generate` offers
 to run `quack setup` rather than failing with a traceback.
 """
@@ -31,6 +34,7 @@ DEFAULT_SEARCH_LIMIT = 10
 DEFAULT_FILE_CHAR_LIMIT = 20_000
 DEFAULT_SQL_ROW_LIMIT = 50
 DEFAULT_CENTRAL_LIMIT = 10
+DEFAULT_STORE_BODY = True
 
 # Known assistants the setup selector offers. `binary` is what we probe for on
 # PATH; `command` is written into config.yaml. Order is the menu order.
@@ -101,11 +105,19 @@ class DefaultsConfig:
 
 
 @dataclass
+class IndexConfig:
+    """Workspace-tunable indexing behavior."""
+
+    store_body: bool = DEFAULT_STORE_BODY
+
+
+@dataclass
 class Config:
     ai: AIConfig
     embed: EmbedConfig
     path: Path | None = None  # the config file that was loaded, if any
     defaults: DefaultsConfig = field(default_factory=DefaultsConfig)
+    index: IndexConfig = field(default_factory=IndexConfig)
 
     @classmethod
     def load(cls, explicit_root: str | None = None) -> "Config":
@@ -133,11 +145,16 @@ class Config:
             sql_row_limit=int(defaults_raw.get("sql_row_limit", DEFAULT_SQL_ROW_LIMIT)),
             central_limit=int(defaults_raw.get("central_limit", DEFAULT_CENTRAL_LIMIT)),
         )
+        index_raw = data.get("index", {}) or {}
+        index = IndexConfig(
+            store_body=_bool_config(index_raw.get("store_body"), DEFAULT_STORE_BODY),
+        )
         return cls(
             ai=ai,
             embed=embed,
             path=path if path.exists() else None,
             defaults=defaults,
+            index=index,
         )
 
 
@@ -172,6 +189,7 @@ def write_config(
                 "central_limit": DEFAULT_CENTRAL_LIMIT,
             },
         )
+        data.setdefault("index", {"store_body": DEFAULT_STORE_BODY})
         data.setdefault("gitignore", True)
         path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
         return path
@@ -196,12 +214,32 @@ def write_config(
         f"  sql_row_limit: {DEFAULT_SQL_ROW_LIMIT}\n"
         f"  central_limit: {DEFAULT_CENTRAL_LIMIT}\n"
         "\n"
+        "index:\n"
+        "  # Store file text in DuckDB for body full-text search. Set false to\n"
+        "  # keep only path/metadata/links in the catalog; run `quack reindex`\n"
+        "  # after changing this so old catalog rows are rebuilt.\n"
+        f"  store_body: {'true' if DEFAULT_STORE_BODY else 'false'}\n"
+        "\n"
         "# Set gitignore: false to opt out of quack managing a block in your\n"
         "# repo's .gitignore (and skip .quack/.gitignore creation).\n"
         "gitignore: true\n"
     )
     path.write_text(body)
     return path
+
+
+def _bool_config(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
 
 
 def _yaml_scalar(value: str) -> str:
