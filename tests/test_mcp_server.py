@@ -69,3 +69,70 @@ def test_mcp_flags_override_config_defaults(indexed_mcp_space):
 
     assert limits.search == 5
     assert mcp_server.search("needle", expand=False)["limit"] == 5
+
+
+# ---------------------------------------------------------------------------
+# next_steps guidance fields (MAR-159 / GH#6)
+# ---------------------------------------------------------------------------
+
+def test_search_with_hits_includes_next_steps(indexed_mcp_space):
+    result = mcp_server.search("needle", expand=False)
+    assert result["hits"]
+    assert "next_steps" in result
+    assert "get_file" in result["next_steps"]
+
+
+def test_search_no_hits_includes_next_steps(indexed_mcp_space):
+    result = mcp_server.search("xyzzy_no_match_ever", expand=False)
+    assert result["hits"] == []
+    assert "next_steps" in result
+    assert "reindex" in result["next_steps"]
+
+
+def test_search_no_semantic_tier_mentions_embed(indexed_mcp_space):
+    result = mcp_server.search("needle", expand=False)
+    tiers_seen = {t for h in result["hits"] for t in h["tiers"]}
+    if "semantic" not in tiers_seen:
+        assert "embed" in result["next_steps"]
+
+
+def test_get_file_truncated_includes_next_steps(indexed_mcp_space):
+    result = mcp_server.get_file("projects/note-0.md", char_limit=12)
+    assert result["truncated"] is True
+    assert "next_steps" in result
+    assert "char_limit" in result["next_steps"]
+
+
+def test_get_file_not_truncated_omits_next_steps(indexed_mcp_space):
+    result = mcp_server.get_file("projects/note-0.md", char_limit=100_000)
+    assert result["truncated"] is False
+    assert "next_steps" not in result
+
+
+def test_describe_includes_next_steps(indexed_mcp_space):
+    result = mcp_server.describe("projects/note-0.md", "A test note", ["test"])
+    assert "next_steps" in result
+    assert "reindex" in result["next_steps"]
+
+
+def test_reindex_includes_next_steps_and_catalog(indexed_mcp_space):
+    result = mcp_server.reindex()
+    assert "next_steps" in result
+    assert "catalog" in result
+
+
+# ---------------------------------------------------------------------------
+# explain() tool (MAR-159 / GH#6)
+# ---------------------------------------------------------------------------
+
+def test_explain_returns_architecture_reference(indexed_mcp_space):
+    result = mcp_server.explain()
+    assert "root" in result
+    assert "data_flow" in result
+    assert "search_tiers" in result
+    assert "structural" in result["search_tiers"]
+    assert "fts" in result["search_tiers"]
+    assert "semantic" in result["search_tiers"]
+    assert "catalog_schema" in result
+    assert "files" in result["catalog_schema"]
+    assert "annotation_workflow" in result

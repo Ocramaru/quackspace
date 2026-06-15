@@ -55,6 +55,9 @@ Semantic search:
 
 All paths are RELATIVE to the quack root, which every result reports as `root`.
 To open a file, join root + path. Never assume an absolute path.
+
+Call `explain()` for a full architecture and data-flow reference, field semantics,
+and the catalog schema.
 """
 
 mcp = FastMCP("quack", instructions=INSTRUCTIONS)
@@ -177,24 +180,54 @@ def map() -> dict[str, Any]:
 
 @mcp.tool()
 def search(query: str, limit: int | None = None, expand: bool = True) -> dict[str, Any]:
-    """Auto-hybrid search: fuses keyword, full-text, and semantic (if embeddings
-    exist) ranking over files, then adds graph neighbours. Also routes the query
-    to folder-level results when it is asking *where*/*which folder*; file and
-    folder hits are returned in separate lists, never blended. The primary way
-    to find things. Paths are relative to `root`."""
+    """Auto-hybrid search over files and folders. Returns up to `limit` results.
+
+    Field semantics:
+    - `tiers`: which ranking methods contributed — 'structural' (name/tag/description
+      match, always available), 'fts' (body text via BM25, always available),
+      'semantic' (vector similarity — only if embeddings were built with `quack embed`).
+      A hit missing 'semantic' is normal when embeddings haven't been built.
+    - `related_via`: non-empty when the hit was pulled in as a link-graph neighbour
+      of a direct match, not matched directly itself.
+    - `folders`: populated when the query asks about location/which-folder (separate
+      list, never blended with file hits). Call `map()` or `sql()` for more folder detail.
+
+    Call `explain()` for a full architecture and schema reference."""
     from .search import route, search_folders
 
     limit = _clamp(limit, LIMITS.search, MAX_SEARCH_LIMIT)
     hits = do_search(query, explicit_root=_root_arg(), limit=limit, expand=expand)
 
     folder_hits: list = []
-    if route(query) in ("folders", "both"):
+    routed = route(query)
+    if routed in ("folders", "both"):
         folder_hits = search_folders(query, explicit_root=_root_arg(), limit=limit)
+
+    if not hits and not folder_hits:
+        next_steps = (
+            "No results. Try broader or different terms. "
+            "If you recently called describe(), call reindex() first — "
+            "the catalog won't reflect new descriptions until then."
+        )
+    else:
+        tiers_seen = {t for h in hits for t in h.tiers}
+        tips = ["Call get_file(path) to read any file."]
+        if "semantic" not in tiers_seen:
+            tips.append(
+                "No 'semantic' tier in results — embeddings haven't been built. "
+                "Run `quack embed` to enable semantic ranking."
+            )
+        if any(h.via for h in hits):
+            tips.append(
+                "'related_via' on a hit means it was pulled in as a link-graph "
+                "neighbour of a direct match, not matched directly."
+            )
+        next_steps = " ".join(tips)
 
     return {
         "root": _root(),
         "limit": limit,
-        "routed_to": route(query),
+        "routed_to": routed,
         "hits": [
             {
                 "path": h.entry.rel,
@@ -215,14 +248,21 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
             }
             for f in folder_hits
         ],
+        "next_steps": next_steps,
     }
 
 
 @mcp.tool()
 def get_file(path_or_name: str, char_limit: int | None = None) -> dict[str, Any]:
-    """Read one file's content + metadata. Accepts a root-relative path
+    """Read one file's full content + metadata. Accepts a root-relative path
     (src/app/main.py) or a bare file name without extension (main). Content is
-    truncated by default so agents do not accidentally pull huge files."""
+    truncated by default — pass a higher `char_limit` if you need more.
+
+    Field semantics:
+    - `stale`: true when the file was modified after its description was last written.
+      Run `quack generate --stale` to refresh stale descriptions.
+    - `truncated`: true when content was cut at `content_limit`; pass
+      char_limit=content_length to read the full file."""
     from .core import Space
 
     space = Space.load(_root_arg())
@@ -231,7 +271,7 @@ def get_file(path_or_name: str, char_limit: int | None = None) -> dict[str, Any]
         return {"root": _root(), "error": f"No file matching {path_or_name!r}."}
     char_limit = _clamp(char_limit, LIMITS.file_chars, MAX_FILE_CHAR_LIMIT)
     content, truncated = _truncate(entry.body, char_limit)
-    return {
+    result: dict[str, Any] = {
         "root": _root(),
         "path": entry.rel,
         "name": entry.name,
@@ -246,6 +286,12 @@ def get_file(path_or_name: str, char_limit: int | None = None) -> dict[str, Any]
         "content_limit": char_limit,
         "truncated": truncated,
     }
+    if truncated:
+        result["next_steps"] = (
+            f"Content truncated at {char_limit} of {len(entry.body)} chars. "
+            f"Call get_file('{entry.rel}', char_limit={len(entry.body)}) to read the full file."
+        )
+    return result
 
 
 @mcp.tool()
@@ -309,12 +355,16 @@ def describe(
     if rel is None:
         return {"root": _root(), "error": f"No file matching {path!r}."}
     return {
-        "root": _root(),
-        "recorded": rel,
-        "description": description,
-        "tags": list(tags or []),
-        "note": "call reindex() when done to refresh search/sql, then embed() for semantic search",
-    }
+    "root": _root(),
+    "recorded": rel,
+    "description": description,
+    "tags": list(tags or []),
+    "next_steps": (
+        "Metadata written to .index.yaml. "
+        "Call reindex() once when done annotating, then embed() for semantic search. "
+        "search/sql/map won't reflect these changes until the catalog is rebuilt."
+    ),
+}
 
 
 @mcp.tool()
@@ -325,7 +375,77 @@ def reindex() -> dict[str, Any]:
     from .indexer import reindex as do_reindex
 
     summary = do_reindex(_root_arg())
-    return {"root": _root(), "files": summary["files"]}
+    return {
+        "root": _root(),
+        "files": summary["files"],
+        "catalog": summary.get("catalog", "rebuilt"),
+        "next_steps": "Catalog is current. Call search() or sql() to query it.",
+    }
+
+
+@mcp.tool()
+def explain() -> dict[str, Any]:
+    """Architecture and data-flow reference for quack. Call this when you need to
+    understand how the pieces fit together, what a tool result field means, or
+    why behavior surprised you. Cheaper than re-reading QUACK.md."""
+    return {
+        "root": _root(),
+        "overview": (
+            "quack is a local filesystem meta layer. It indexes a directory of files "
+            "into a DuckDB catalog and exposes that catalog over MCP so agents can "
+            "navigate precisely without loading the whole tree into context."
+        ),
+        "data_flow": (
+            "describe() writes into .index.yaml (the editable store). "
+            "reindex() rebuilds .quack/quack.duckdb from those files. "
+            "search/sql/map/get_file all read from the catalog. "
+            "The catalog is derived and never authoritative — delete it and "
+            "reindex() rebuilds it from scratch."
+        ),
+        "authoritative_vs_derived": {
+            "authored — you edit these": [
+                ".index.yaml per folder: descriptions + tags for direct children",
+                ".quack/config.yaml: AI assistant choice and limits",
+            ],
+            "generated — never edit": [
+                ".quack/quack.duckdb: the full catalog",
+                ".quack/map.yaml: nested folder tree",
+                "QUACK.md: navigation anchor",
+                "<folder>/_diagrams.md: Mermaid link graph",
+            ],
+        },
+        "search_tiers": {
+            "structural": "name, tag, and description match — always available",
+            "fts": "full-text body search via DuckDB BM25 — always available",
+            "semantic": (
+                "vector similarity — only available after `quack embed` has been run. "
+                "A result with no 'semantic' tier is normal when embeddings don't exist."
+            ),
+        },
+        "search_field_semantics": {
+            "tiers": "which ranking methods contributed to this hit",
+            "related_via": (
+                "non-empty when the hit was expanded from the link graph as a neighbour "
+                "of a direct match, not matched directly itself"
+            ),
+            "stale": "true when the file changed after its description was last written — refresh with `quack generate --stale`",
+            "folders": (
+                "populated when the query asks about location/which-folder; "
+                "kept separate from file hits, never blended"
+            ),
+        },
+        "catalog_schema": {
+            "files": "name, rel, folder, ext, description, tags_csv, n_links, n_inbound, is_orphan, is_binary, file_modified, described_at, stale, body",
+            "folders": "folder, parent, description, n_files, diagram, described_at — subfolders of X: WHERE parent = 'X' (root = '')",
+            "tags": "name, tag",
+            "links": "src, dst, dst_exists",
+        },
+        "annotation_workflow": (
+            "Already know this repo? Call describe(path, description, tags) for each "
+            "relevant file, then call reindex() once. No per-file model call needed — "
+            "you write what you know and the catalog becomes searchable."
+        ),
+    }
 
 
 @mcp.tool()
