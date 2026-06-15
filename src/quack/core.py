@@ -402,7 +402,9 @@ _META_MARKERS = (".index.yaml", ".folder.md")
 
 
 def scan_signature(
-    root: Path, ignores: set[str] | None = None
+    root: Path,
+    ignores: set[str] | None = None,
+    progress: "Callable[[int, int, str], None] | None" = None,
 ) -> tuple[dict[str, str], set[str], int]:
     """Stat-only change signature — no file reads, no parsing.
 
@@ -414,6 +416,10 @@ def scan_signature(
     seen. Used for a cheap reindex no-op check before paying for a full
     :func:`walk`."""
     patterns = ignores if ignores is not None else load_ignores(root)
+    total = count_indexable(root, patterns) if progress is not None else 0
+    seen = 0
+    if progress is not None:
+        progress(0, max(total, 1), "Checking files")
     files: dict[str, str] = {}
     folders: set[str] = set()
     newest_marker_ns = 0
@@ -435,7 +441,12 @@ def scan_signature(
                 continue
             rel = full.relative_to(root).as_posix()
             if _keep_file(fn, rel, patterns):
+                seen += 1
                 files[rel] = _mtime_iso(full)
+                if progress is not None and (seen == total or seen % 100 == 0):
+                    progress(seen, max(total, 1), f"Checking {rel}")
+    if progress is not None and seen == 0:
+        progress(1, 1, "Checked files")
     return files, folders, newest_marker_ns
 
 

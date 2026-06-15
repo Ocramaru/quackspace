@@ -74,6 +74,24 @@ def test_search_reports_tier_progress(sample_space):
     assert calls[-1] == (6, 6, "Search complete")
 
 
+def test_reindex_fast_noop_reports_file_progress(sample_space):
+    root = sample_space
+    reindex(str(root))
+    calls: list[tuple[int, int, str]] = []
+
+    summary = reindex(
+        str(root),
+        progress=lambda done, total, message: calls.append((done, total, message)),
+    )
+
+    assert summary["folder_indexes"] == 0
+    assert summary["files"] == 3
+    assert calls[0] == (0, 3, "Checking files")
+    assert calls[-1][0] == 3
+    assert calls[-1][1] == 3
+    assert calls[-1][2].startswith("Checking ")
+
+
 def test_index_store_preserves_authored_fields_and_record_updates_metadata(sample_space):
     root = sample_space
     reindex(str(root))

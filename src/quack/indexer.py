@@ -282,7 +282,9 @@ def _dirty_folders(
     return None if d.full_rebuild else d.folders
 
 
-def _fast_noop(root: Path) -> dict | None:
+def _fast_noop(
+    root: Path, progress: Callable[[int, int, str], None] | None = None
+) -> dict | None:
     """Return the no-op reindex summary if a stat-only check proves nothing
     changed since the last build, else None. Conservative: any uncertainty
     (a touched metadata file, a folder/file set difference, a changed mtime)
@@ -316,7 +318,7 @@ def _fast_noop(root: Path) -> dict | None:
     except (TypeError, ValueError):
         return None
 
-    files, folders_now, newest_marker_ns = scan_signature(root)
+    files, folders_now, newest_marker_ns = scan_signature(root, progress=progress)
     if newest_marker_ns > built_at_ns:  # a .index.yaml/.folder.md edited since build
         return None
     if set(files) != set(stored_files) or folders_now != stored_folders:
@@ -369,7 +371,7 @@ def reindex(
     # nothing has changed (the common reindex). Conservative — any doubt falls
     # through to the accurate full path below.
     root = find_root(explicit_root)
-    noop = _fast_noop(root)
+    noop = _fast_noop(root, progress=progress)
     if noop is not None:
         ensure_gitignore(root)
         return noop
