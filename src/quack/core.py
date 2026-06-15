@@ -117,6 +117,15 @@ def find_root(explicit: str | None = None) -> Path:
     )
 
 
+def _mtime_iso(path: Path) -> str:
+    """A file's mtime as an ISO-8601 second-precision string ('' if missing)."""
+    try:
+        ts = path.stat().st_mtime
+    except OSError:
+        return ""
+    return datetime.fromtimestamp(ts).isoformat(timespec="seconds")
+
+
 def _read_text(path: Path) -> tuple[str, bool]:
     """Return (body, is_binary). Files containing NUL bytes are treated as
     binary and yield an empty body. Only the first TEXT_BODY_MAX_BYTES are read
@@ -223,11 +232,7 @@ class Entry:
     def modified(self) -> str:
         """The file's mtime as an ISO-8601 second-precision string ('' if the
         file is gone). Refreshed every reindex."""
-        try:
-            ts = self.path.stat().st_mtime
-        except OSError:
-            return ""
-        return datetime.fromtimestamp(ts).isoformat(timespec="seconds")
+        return _mtime_iso(self.path)
 
     @property
     def described_at(self) -> str:
@@ -389,6 +394,49 @@ def count_indexable(root: Path, ignores: set[str] | None = None) -> int:
             if _keep_file(fn, rel, patterns):
                 n += 1
     return n
+
+
+# Per-folder metadata files quack writes/reads; an edit to one of these can
+# change effective metadata without changing any indexed file's mtime.
+_META_MARKERS = (".index.yaml", ".folder.md")
+
+
+def scan_signature(
+    root: Path, ignores: set[str] | None = None
+) -> tuple[dict[str, str], set[str], int]:
+    """Stat-only change signature — no file reads, no parsing.
+
+    Returns ``(files, folders, newest_marker_ns)`` where ``files`` maps each
+    indexable file's rel → its mtime string (same format as ``Entry.modified``),
+    ``folders`` is the set of folder rels, and ``newest_marker_ns`` is the latest
+    ``st_mtime_ns`` among ``.index.yaml``/``.folder.md`` (0 if none) — nanosecond
+    precision so an authored edit made in the same second as a build is still
+    seen. Used for a cheap reindex no-op check before paying for a full
+    :func:`walk`."""
+    patterns = ignores if ignores is not None else load_ignores(root)
+    files: dict[str, str] = {}
+    folders: set[str] = set()
+    newest_marker_ns = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        record, descend = _level(base, dirnames, root, patterns)
+        for d in record:
+            folders.add(d.relative_to(root).as_posix())
+        dirnames[:] = descend
+        for fn in filenames:
+            full = base / fn
+            if fn in _META_MARKERS:
+                try:
+                    ns = full.stat().st_mtime_ns
+                except OSError:
+                    ns = 0
+                if ns > newest_marker_ns:
+                    newest_marker_ns = ns
+                continue
+            rel = full.relative_to(root).as_posix()
+            if _keep_file(fn, rel, patterns):
+                files[rel] = _mtime_iso(full)
+    return files, folders, newest_marker_ns
 
 
 def iter_files(root: Path, ignores: set[str] | None = None):

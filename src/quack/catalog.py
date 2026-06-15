@@ -25,6 +25,7 @@ stay `GROUP BY` queries the YAML caches.
 from __future__ import annotations
 
 import threading
+import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -260,6 +261,12 @@ def _write_metadata(con: duckdb.DuckDBPyConnection) -> None:
     con.execute(
         "INSERT INTO metadata VALUES ('built_at', ?)",
         [datetime.now().isoformat(timespec="seconds")],
+    )
+    # Nanosecond build timestamp for the stat-only reindex no-op check: it
+    # compares marker-file mtimes against this, and second precision would miss
+    # an authored edit made in the same second as the build.
+    con.execute(
+        "INSERT INTO metadata VALUES ('built_at_ns', ?)", [str(time.time_ns())]
     )
 
 
