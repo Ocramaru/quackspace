@@ -179,8 +179,8 @@ def map() -> dict[str, Any]:
         "folders": [dict(zip(cols, r)) for r in rows],
         "next_steps": (
             "Pick a folder then call search(query) to find files inside it, "
-            "or sql(\"SELECT name, description FROM files WHERE folder = '<folder>'\") "
-            "to list its contents directly."
+            "or sql(\"SELECT rel, name, description FROM files WHERE folder = '<folder>' ORDER BY name\") "
+            "to list its contents directly. Use `rel` as the path argument to get_file()."
         ),
     }
 
@@ -218,7 +218,7 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
         )
     else:
         tiers_seen = {t for h in hits for t in h.tiers}
-        tips = ["Call get_file(path) to read any file."]
+        tips = ["Call get_file(path) to read any file; use the `path` field directly."]
         if "semantic" not in tiers_seen:
             tips.append(
                 "No 'semantic' tier in results — embeddings haven't been built. "
@@ -231,15 +231,20 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
             )
         if any(h.entry.stale for h in hits):
             tips.append(
-                "Some hits have stale=true — their description was written before "
-                "the file last changed. Run `quack generate --stale` to refresh them."
+                "Some hits have stale=true — their description may be outdated. "
+                "Read the file content with get_file() before relying on the description."
             )
         next_steps = " ".join(tips)
 
     return {
         "root": _root(),
+        "query": query,
         "limit": limit,
+        "hit_count": len(hits),
+        "folder_count": len(folder_hits),
         "routed_to": routed,
+        "searched_files": routed in ("files", "both"),
+        "searched_folders": routed in ("folders", "both"),
         "hits": [
             {
                 "path": h.entry.rel,
@@ -257,7 +262,7 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
                 "path": f.folder,
                 "parent": f.parent,
                 "description": f.description,
-                "via": f.via,
+                "matched_by": f.via,
             }
             for f in folder_hits
         ],
@@ -304,9 +309,23 @@ def get_file(path_or_name: str, char_limit: int | None = None) -> dict[str, Any]
         "truncated": truncated,
     }
     if truncated:
+        next_limit = min(len(entry.body), MAX_FILE_CHAR_LIMIT)
+        if next_limit < len(entry.body):
+            result["next_steps"] = (
+                f"Content truncated at {char_limit} of {len(entry.body)} chars. "
+                f"File exceeds the {MAX_FILE_CHAR_LIMIT}-char maximum; "
+                f"call get_file('{entry.rel}', char_limit={MAX_FILE_CHAR_LIMIT}) to read as much as possible, "
+                "or use sql() to query specific fields."
+            )
+        else:
+            result["next_steps"] = (
+                f"Content truncated at {char_limit} of {len(entry.body)} chars. "
+                f"Call get_file('{entry.rel}', char_limit={next_limit}) to read the full file."
+            )
+    else:
         result["next_steps"] = (
-            f"Content truncated at {char_limit} of {len(entry.body)} chars. "
-            f"Call get_file('{entry.rel}', char_limit={len(entry.body)}) to read the full file."
+            "Full content returned. Call describe(path, description, tags) to record "
+            "what you learned about this file, then reindex() to make it searchable."
         )
     return result
 
@@ -324,8 +343,10 @@ def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
     cols, rows, truncated = _query_limited(query, row_limit)
     result: dict[str, Any] = {
         "root": _root(),
+        "query": query,
         "columns": cols,
         "rows": [list(r) for r in rows],
+        "row_count": len(rows),
         "row_limit": row_limit,
         "truncated": truncated,
     }
@@ -339,26 +360,43 @@ def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def graph_path(src: str, dst: str) -> dict[str, Any]:
-    """Shortest path of wikilinks between two files (by name). Returns the node
-    names on the path, or null if they are not connected."""
-    return {"root": _root(), "path": graph_mod.shortest_path(src, dst, explicit_root=_root_arg())}
+    """Shortest wikilink path between two files, identified by name. Use after
+    search() or get_file() when you already have two specific file names and want
+    to understand how they are connected. Returns node names on the path, or null
+    if they are not reachable from each other."""
+    path = graph_mod.shortest_path(src, dst, explicit_root=_root_arg())
+    return {
+        "root": _root(),
+        "src": src,
+        "dst": dst,
+        "connected": path is not None,
+        "path": path,
+    }
 
 
 @mcp.tool()
 def central(limit: int | None = None) -> dict[str, Any]:
-    """Most-connected files (hubs) by link degree."""
+    """Most-connected files (hubs) by wikilink degree. Use when you want
+    important or heavily-referenced files rather than keyword-relevant ones —
+    hubs are natural starting points for exploring an unfamiliar space."""
     limit = _clamp(limit, LIMITS.central, MAX_CENTRAL_LIMIT)
     rows = graph_mod.centrality(explicit_root=_root_arg(), limit=limit)
     return {
         "root": _root(),
         "limit": limit,
         "hubs": [{"name": n, "path": r, "degree": d} for n, r, d in rows],
+        "next_steps": (
+            "Call get_file(path) on any hub to read it, or graph_path(src, dst) "
+            "to trace how two hub files connect."
+        ),
     }
 
 
 @mcp.tool()
 def clusters() -> dict[str, Any]:
-    """Connected components of the link graph. Singletons are orphan files."""
+    """Connected components of the wikilink graph. Use to discover topic islands
+    (groups of inter-linked files) and orphan files (singletons with no links).
+    Complements search() when you want topological structure rather than relevance."""
     return {"root": _root(), "clusters": graph_mod.components(explicit_root=_root_arg())}
 
 
@@ -376,7 +414,15 @@ def describe(
 
     rel = generate.record(_root_arg(), path, description, list(tags or []))
     if rel is None:
-        return {"root": _root(), "error": f"No file matching {path!r}."}
+        return {
+            "root": _root(),
+            "error": f"No file matching {path!r}.",
+            "next_steps": (
+                "Call search(query) or "
+                "sql(\"SELECT rel, name FROM files WHERE name LIKE '%<term>%'\") "
+                "to find the exact path, then call describe(path=<rel>, ...)."
+            ),
+        }
     return {
     "root": _root(),
     "recorded": rel,

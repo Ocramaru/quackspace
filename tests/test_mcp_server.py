@@ -103,10 +103,11 @@ def test_get_file_truncated_includes_next_steps(indexed_mcp_space):
     assert "char_limit" in result["next_steps"]
 
 
-def test_get_file_not_truncated_omits_next_steps(indexed_mcp_space):
+def test_get_file_not_truncated_includes_describe_guidance(indexed_mcp_space):
     result = mcp_server.get_file("projects/note-0.md", char_limit=100_000)
     assert result["truncated"] is False
-    assert "next_steps" not in result
+    assert "next_steps" in result
+    assert "describe" in result["next_steps"]
 
 
 def test_describe_includes_next_steps(indexed_mcp_space):
