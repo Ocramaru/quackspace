@@ -24,16 +24,24 @@ stay `GROUP BY` queries the YAML caches.
 
 from __future__ import annotations
 
+import threading
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 import duckdb
 
-from .core import Space
+from .core import Space, find_root
 
 DB_NAME = "quack.duckdb"
 SCHEMA_VERSION = 2
+
+
+def resolve_db(explicit_root: str | None = None) -> Path:
+    """The catalog path for a root, resolved like ``find_root`` (walk up for the
+    ``.quack/`` marker) — WITHOUT loading the whole space. Cheap; safe to call
+    on every MCP tool invocation."""
+    return find_root(explicit_root) / ".quack" / DB_NAME
 
 
 def db_path(space: Space) -> Path:
@@ -52,6 +60,9 @@ def build(space: Space, folder_infos: "dict | None" = None) -> dict:
         folder_infos = _folders.resolve_folders(space)
 
     path = db_path(space)
+    # Close any cached read-only connection first: DuckDB won't open a
+    # read-write connection while a read-only one to the same file is live.
+    invalidate(path)
     if path.exists():
         path.unlink()  # rebuild clean; the files + .index.yaml are the truth
 
@@ -87,6 +98,9 @@ def build(space: Space, folder_infos: "dict | None" = None) -> dict:
     try:
         _create_schema(con)
         _write_metadata(con)
+        # One transaction for all inserts: DuckDB auto-commits per statement, so
+        # row-by-row executemany without this commits N times and is ~8x slower.
+        con.execute("BEGIN TRANSACTION")
         if file_rows:
             con.executemany("INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", file_rows)
         if folder_rows:
@@ -95,6 +109,7 @@ def build(space: Space, folder_infos: "dict | None" = None) -> dict:
             con.executemany("INSERT INTO tags VALUES (?,?)", tag_rows)
         if link_rows:
             con.executemany("INSERT INTO links VALUES (?,?,?)", link_rows)
+        con.execute("COMMIT")
         _build_fts(con)
         n_files = con.execute("SELECT count(*) FROM files").fetchone()[0]
         n_folders = con.execute("SELECT count(*) FROM folders").fetchone()[0]
@@ -103,6 +118,7 @@ def build(space: Space, folder_infos: "dict | None" = None) -> dict:
     finally:
         con.close()
 
+    invalidate(path)  # any cached read-only connection now points to a stale file
     return {
         "db": str(path),
         "files": n_files,
@@ -125,6 +141,7 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
         folder_infos = _folders.resolve_folders(space)
 
     path = db_path(space)
+    invalidate(path)  # free any cached read-only connection before writing
     con = duckdb.connect(str(path))
     try:
         stored = {
@@ -133,6 +150,9 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
                 "SELECT rel, tags_csv, described_at, file_modified FROM files"
             ).fetchall()
         }
+        # One transaction for all writes (see build(): per-statement commits are
+        # ~8x slower than batching them).
+        con.execute("BEGIN TRANSACTION")
         for e in space.entries:
             current = (",".join(e.tags), e.described_at, e.modified)
             if stored.get(e.rel) != current:
@@ -157,6 +177,7 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
         ]
         if folder_rows:
             con.executemany("INSERT INTO folders VALUES (?,?,?,?,?,?)", folder_rows)
+        con.execute("COMMIT")
 
         n_files = con.execute("SELECT count(*) FROM files").fetchone()[0]
         n_folders = con.execute("SELECT count(*) FROM folders").fetchone()[0]
@@ -269,9 +290,60 @@ def connect_path(path: Path) -> duckdb.DuckDBPyConnection:
 
 
 def connect(explicit_root: str | None = None) -> duckdb.DuckDBPyConnection:
-    """Open the catalog read-only for querying. Caller closes it."""
-    space = Space.load(explicit_root)
-    return connect_path(db_path(space))
+    """Open the catalog read-only for querying. Caller closes it. Resolves the
+    path without loading the whole space (no filesystem walk per query)."""
+    return connect_path(resolve_db(explicit_root))
+
+
+# ---------------------------------------------------------------------------
+# Shared connection cache — for long-lived processes (the MCP server), so the
+# catalog file is opened once and reused across many tool calls instead of
+# reopened every time. Automatically reopened when the catalog changes (e.g.
+# after `reindex`), detected by the file's stat signature. For per-query thread
+# safety, call `.cursor()` on the returned connection.
+# ---------------------------------------------------------------------------
+_CACHE_LOCK = threading.Lock()
+_SHARED: dict[str, tuple[duckdb.DuckDBPyConnection, tuple]] = {}
+
+
+def _stat_signature(path: Path) -> tuple:
+    st = path.stat()
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
+def shared_connection(path: Path) -> duckdb.DuckDBPyConnection:
+    """A cached, read-only connection reused across calls in one process. The
+    caller must NOT close it (use ``con.cursor()`` for an isolated, thread-safe
+    query handle). Reopens automatically when the catalog file changes."""
+    key = str(path)
+    sig = _stat_signature(path)  # raises if the file is gone → caller falls back
+    with _CACHE_LOCK:
+        cached = _SHARED.get(key)
+        if cached is not None:
+            con, cached_sig = cached
+            if cached_sig == sig:
+                return con
+            try:
+                con.close()
+            except Exception:
+                pass
+        con = connect_path(path)
+        _SHARED[key] = (con, sig)
+        return con
+
+
+def invalidate(path: Path | None = None) -> None:
+    """Drop cached connection(s) — call after rewriting the catalog so the next
+    reader reopens the fresh file. ``None`` clears the whole cache."""
+    with _CACHE_LOCK:
+        keys = [str(path)] if path is not None else list(_SHARED)
+        for k in keys:
+            entry = _SHARED.pop(k, None)
+            if entry is not None:
+                try:
+                    entry[0].close()
+                except Exception:
+                    pass
 
 
 def query(sql: str, explicit_root: str | None = None) -> tuple[list[str], list[tuple]]:
@@ -289,6 +361,29 @@ def _neighbours_query(
     con: duckdb.DuckDBPyConnection, names: list[str], hops: int = 1
 ) -> list[tuple[str, str, int, str]]:
     placeholders = ",".join("?" for _ in names)
+    if hops <= 1:
+        # The common case (search expansion): direct 1-hop neighbours need no
+        # recursion — a plain join over the bidirectional edge set is much
+        # cheaper than spinning up a recursive CTE.
+        return con.execute(
+            f"""
+            WITH edge(a, b) AS (
+                SELECT src, dst FROM links WHERE dst_exists
+                UNION ALL
+                SELECT dst, src FROM links WHERE dst_exists
+            ),
+            ranked AS (
+                SELECT e.b AS name, n.rel, 1 AS dist, e.a AS seed,
+                       row_number() OVER (PARTITION BY e.b ORDER BY e.a) AS rn
+                FROM edge e JOIN files n ON n.name = e.b
+                WHERE e.a IN ({placeholders})
+                  AND e.b NOT IN ({placeholders})
+            )
+            SELECT name, rel, dist, seed FROM ranked WHERE rn = 1
+            ORDER BY name
+            """,
+            [*names, *names],
+        ).fetchall()
     return con.execute(
         f"""
         WITH RECURSIVE
@@ -318,6 +413,46 @@ def _neighbours_query(
     ).fetchall()
 
 
+def tag_neighbours_on(
+    con: duckdb.DuckDBPyConnection,
+    names: list[str],
+    limit: int = 10,
+    max_tag_freq: int = 25,
+) -> list[tuple[str, str, int]]:
+    """Files related to the seeds by *shared tags*, ranked by how many tags they
+    share. Returns [(name, rel, shared_tag_count), ...], excluding the seeds.
+
+    High-frequency tags are skipped (a tag on more than *max_tag_freq* files —
+    e.g. a generic recognition tag like ``python`` on every source file — links
+    everything to everything, so it's noise, not a relationship). This makes tag
+    relatedness useful for code repos that have few or no [[wikilinks]]."""
+    if not names:
+        return []
+    ph = ",".join("?" for _ in names)
+    return con.execute(
+        f"""
+        WITH common AS (
+            SELECT tag FROM tags GROUP BY tag HAVING count(*) > ?
+        ),
+        seed_tags AS (
+            SELECT DISTINCT tag FROM tags
+            WHERE name IN ({ph}) AND tag NOT IN (SELECT tag FROM common)
+        ),
+        shared AS (
+            SELECT t.name, count(*) AS shared
+            FROM tags t JOIN seed_tags st ON t.tag = st.tag
+            WHERE t.name NOT IN ({ph})
+            GROUP BY t.name
+        )
+        SELECT s.name, f.rel, s.shared
+        FROM shared s JOIN files f ON f.name = s.name
+        ORDER BY s.shared DESC, s.name
+        LIMIT ?
+        """,
+        [max_tag_freq, *names, *names, limit],
+    ).fetchall()
+
+
 def neighbours_path(
     db: Path, names: list[str], hops: int = 1
 ) -> list[tuple[str, str, int, str]]:
@@ -343,17 +478,16 @@ def neighbours(
     """
     if not names:
         return []
-    space = Space.load(explicit_root)
-    return neighbours_path(db_path(space), names, hops)
+    return neighbours_path(resolve_db(explicit_root), names, hops)
 
 
 def _fts_query(
     con: duckdb.DuckDBPyConnection, terms: str, limit: int
-) -> list[tuple[str, str, float]]:
+) -> list[tuple[str, str, str, float]]:
     return con.execute(
         """
-        SELECT rel, description, score FROM (
-            SELECT rel, description,
+        SELECT rel, name, description, score FROM (
+            SELECT rel, name, description,
                    fts_main_files.match_bm25(name, ?) AS score
             FROM files
         ) WHERE score IS NOT NULL
@@ -370,7 +504,7 @@ def fts_search_path(
     """BM25 full-text search against a known catalog path. Returns [(rel, description, score)]."""
     con = connect_path(db)
     try:
-        return _fts_query(con, terms, limit)
+        return [(rel, desc, score) for rel, _name, desc, score in _fts_query(con, terms, limit)]
     finally:
         con.close()
 
@@ -379,8 +513,7 @@ def fts_search(
     terms: str, explicit_root: str | None = None, limit: int = 10
 ) -> list[tuple[str, str, float]]:
     """BM25 full-text search. Returns [(rel, description, score), ...]."""
-    space = Space.load(explicit_root)
-    return fts_search_path(db_path(space), terms, limit)
+    return fts_search_path(resolve_db(explicit_root), terms, limit)
 
 
 def list_folders_path(db: Path) -> list[tuple[str, str, str]]:
@@ -411,9 +544,48 @@ def docs_on(con: duckdb.DuckDBPyConnection) -> list[tuple[str, str, str, str]]:
     return con.execute("SELECT name, rel, description, tags_csv FROM files").fetchall()
 
 
+def structural_candidates_on(
+    con: duckdb.DuckDBPyConnection, terms: list[str]
+) -> list[tuple[str, str, str]]:
+    """Only the files whose short fields (name/tags/description) contain at least
+    one term — matched in SQL so we don't pull every row into Python. Returns
+    [(name, description, tags_csv), ...]. ``terms`` are already lowercased;
+    ``contains`` matches literal substrings (matching the Python scorer)."""
+    if not terms:
+        return []
+    clauses = []
+    params: list[str] = []
+    for t in terms:
+        clauses.append(
+            "(contains(lower(name), ?) OR contains(lower(tags_csv), ?) "
+            "OR contains(lower(description), ?))"
+        )
+        params += [t, t, t]
+    where = " OR ".join(clauses)
+    return con.execute(
+        f"SELECT name, description, tags_csv FROM files WHERE {where}", params
+    ).fetchall()
+
+
+def docs_for_names_on(
+    con: duckdb.DuckDBPyConnection, names: list[str]
+) -> list[tuple[str, str, str, str]]:
+    """Full short rows for a bounded set of result names (so we fetch metadata
+    only for what we'll actually return). Returns [(name, rel, description,
+    tags_csv), ...]."""
+    if not names:
+        return []
+    ph = ",".join("?" for _ in names)
+    return con.execute(
+        f"SELECT name, rel, description, tags_csv FROM files WHERE name IN ({ph})",
+        list(names),
+    ).fetchall()
+
+
 def fts_on(
     con: duckdb.DuckDBPyConnection, terms: str, limit: int = 10
-) -> list[tuple[str, str, float]]:
+) -> list[tuple[str, str, str, float]]:
+    """BM25 on an open connection. Returns [(rel, name, description, score), ...]."""
     return _fts_query(con, terms, limit)
 
 

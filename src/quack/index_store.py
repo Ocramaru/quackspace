@@ -43,6 +43,21 @@ from pathlib import Path
 
 import yaml
 
+# Prefer libyaml's C dumper/loader when present — ~5x faster YAML, same output,
+# no extra dependency (it ships with PyYAML where libyaml is available). Falls
+# back to the pure-Python versions otherwise.
+_DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
+_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+def fast_dump(data) -> str:
+    return yaml.dump(data, Dumper=_DUMPER, sort_keys=False, allow_unicode=True)
+
+
+def fast_load(text: str):
+    return yaml.load(text, Loader=_LOADER)
+
+
 INDEX_NAME = ".index.yaml"
 FILES_KEY = "files"
 DIRS_KEY = "directories"
@@ -74,7 +89,7 @@ def _read_doc(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        data = yaml.safe_load(path.read_text()) or {}
+        data = fast_load(path.read_text()) or {}
     except yaml.YAMLError:
         return {}
     return data if isinstance(data, dict) else {}
@@ -174,7 +189,7 @@ def write_index(
     doc[FILES_KEY] = _file_body(entries)
     path = index_path(folder)
     path.write_text(
-        HEADER + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+        HEADER + fast_dump(doc)
     )
     return path
 
@@ -209,5 +224,5 @@ def set_meta(
     bucket[name] = entry
     doc[section] = bucket
     path.write_text(
-        HEADER + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+        HEADER + fast_dump(doc)
     )

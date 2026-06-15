@@ -29,8 +29,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-import yaml
-
 from . import catalog, folders, index_store
 from .folders import FolderInfo
 from .core import Space
@@ -129,16 +127,14 @@ def write_map(space: Space, folder_infos: dict[str, FolderInfo]) -> Path:
     out = space.root / ".quack" / "map.yaml"
     out.write_text(
         GENERATED_HEADER
-        + yaml.safe_dump(
+        + index_store.fast_dump(
             {
                 "space": space.root.name,
                 "files": len(space.entries),
                 "types": dict(space_types),
                 "tags": [t for t, _ in space_tags.most_common(10)],
                 "folders": tree,
-            },
-            sort_keys=False,
-            allow_unicode=True,
+            }
         )
     )
     return out

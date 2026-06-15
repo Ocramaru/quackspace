@@ -129,21 +129,20 @@ def _score_row(
     return score, reasons
 
 
-def _open_corpus(explicit_root: str | None):
-    """Return (rows, con) for a search.
-
-    Opens the catalog **once** and reads the short structural fields; the same
-    connection is reused for the FTS and graph tiers (no reopening per tier).
-    Falls back to a filesystem load with no connection only when there is no
-    usable catalog yet, so search still works before the first reindex."""
-    db = find_root(explicit_root) / ".quack" / DB_NAME
-    try:
-        con = catalog.connect_path(db)
-        return catalog.docs_on(con), con
-    except Exception:
-        space = Space.load(explicit_root)
-        rows = [(e.name, e.rel, e.description, ",".join(e.tags)) for e in space.entries]
-        return rows, None
+def _structural_candidates(cur, fallback_rows, terms):
+    """[(score, name, reasons), …] for files matching the short fields. From SQL
+    (only matching rows) when a catalog is open, else from the fallback rows."""
+    if cur is not None:
+        rows = ((n, d, t) for n, d, t in catalog.structural_candidates_on(cur, terms))
+    else:
+        rows = ((n, d, t) for n, _rel, d, t in fallback_rows)
+    scored = []
+    for name, desc, tags_csv in rows:
+        s, reasons = _score_row(name, desc, tags_csv, terms)
+        if s > 0:
+            scored.append((s, name, reasons))
+    scored.sort(key=lambda t: -t[0])
+    return scored
 
 
 def search(
@@ -160,26 +159,28 @@ def search(
     exact matches (structural/FTS) and conceptual matches (semantic) blend
     sensibly. Graph expansion then pulls in neighbours of the top hits.
 
-    All tiers read the catalog snapshot — search no longer loads the filesystem
-    on every call, so it scales with relevance, not space size.
+    Reads the catalog snapshot — no filesystem walk — and only the rows that
+    match (the database does the filtering), so search scales with relevance,
+    not space size. In a long-lived process (the MCP server) it reuses a cached
+    connection; a per-call cursor keeps concurrent calls isolated.
     """
     terms = _terms(query)
     if not terms:
         return []
 
-    rows, con = _open_corpus(explicit_root)
+    db = find_root(explicit_root) / ".quack" / DB_NAME
+    cur = None
+    fallback_rows: list[tuple] | None = None
     try:
-        doc_by_name: dict[str, Doc] = {}
-        name_by_rel: dict[str, str] = {}
-        for name, rel, desc, tags_csv in rows:
-            doc_by_name[name] = Doc(
-                rel=rel,
-                name=name,
-                description=desc or "",
-                tags=[t for t in (tags_csv or "").split(",") if t],
-            )
-            name_by_rel[rel] = name
+        cur = catalog.shared_connection(db).cursor()
+    except Exception:
+        # No catalog yet — fall back to a filesystem load (slow path, rare).
+        space = Space.load(explicit_root)
+        fallback_rows = [
+            (e.name, e.rel, e.description, ",".join(e.tags)) for e in space.entries
+        ]
 
+    try:
         fused: dict[str, float] = {}
         reasons_by_name: dict[str, list[str]] = {}
         tiers_by_name: dict[str, list[str]] = {}
@@ -191,23 +192,17 @@ def search(
                 if tier not in tiers_by_name[name]:
                     tiers_by_name[name].append(tier)
 
-        # Tier 1: structural (always available), scored over the short catalog
-        # fields. Body matches come from the FTS tier below.
-        scored: list[tuple[float, str, list[str]]] = []
-        for name, _rel, desc, tags_csv in rows:
-            s, reasons = _score_row(name, desc, tags_csv, terms)
-            if s > 0:
-                scored.append((s, name, reasons))
-        scored.sort(key=lambda t: -t[0])
-        add_tier("structural", [name for _s, name, _r in scored])
-        for _s, name, reasons in scored:
+        # Tier 1: structural (short fields only; body is FTS's job).
+        structural = _structural_candidates(cur, fallback_rows, terms)
+        add_tier("structural", [name for _s, name, _r in structural])
+        for _s, name, reasons in structural:
             reasons_by_name[name] = reasons
 
-        # Tier 2: FTS — on the same connection (None only before first reindex).
-        if con is not None:
+        # Tier 2: FTS — on the shared connection (cur is None only pre-reindex).
+        if cur is not None:
             try:
-                fts = catalog.fts_on(con, query, limit=max(limit * 2, 20))
-                add_tier("fts", [name_by_rel.get(rel, rel) for rel, _d, _s in fts])
+                fts = catalog.fts_on(cur, query, limit=max(limit * 2, 20))
+                add_tier("fts", [name for _rel, name, _d, _s in fts])
             except Exception:
                 pass
 
@@ -219,35 +214,55 @@ def search(
         except Exception:
             pass
 
+        # Graph expansion of the top hits only (neighbours score below every
+        # direct hit, so expanding lower-ranked hits is wasted). Relatedness is
+        # wikilink neighbours + shared tags (the latter works for code repos
+        # with no [[wikilinks]]).
+        related: dict[str, str] = {}
+        if expand and fused and cur is not None:
+            seeds = [n for n, _s in sorted(fused.items(), key=lambda kv: -kv[1])[:limit]]
+            try:
+                for name, _rel, _dist, via_seed in catalog.neighbours_on(cur, seeds, hops=1):
+                    if name not in fused:
+                        related.setdefault(name, via_seed)
+            except Exception:
+                pass
+            try:
+                for name, _rel, _shared in catalog.tag_neighbours_on(cur, seeds, limit=limit):
+                    if name not in fused:
+                        related.setdefault(name, "tags")
+            except Exception:
+                pass
+
+        # Fetch full metadata only for the bounded result set (not every file).
+        result_names = list(fused) + list(related)
+        if cur is not None:
+            doc_rows = catalog.docs_for_names_on(cur, result_names)
+        else:
+            wanted = set(result_names)
+            doc_rows = [r for r in fallback_rows if r[0] in wanted]
+        doc_by_name = {
+            name: Doc(rel, name, desc or "", [t for t in (tags or "").split(",") if t])
+            for name, rel, desc, tags in doc_rows
+        }
+
         hits: dict[str, Hit] = {}
         for name, score in fused.items():
             doc = doc_by_name.get(name)
-            if doc is None:
-                continue
-            hits[name] = Hit(
-                entry=doc,
-                score=score,
-                reasons=reasons_by_name.get(name, []),
-                tiers=tiers_by_name.get(name, []),
-            )
-
-        # Graph expansion: neighbours of the matches, on the same connection.
-        if expand and hits and con is not None:
-            seeds = list(hits)
-            try:
-                neigh = catalog.neighbours_on(con, seeds, hops=1)
-            except Exception:
-                neigh = []
-            for name, rel, dist, via_seed in neigh:
-                if name in hits:
-                    continue
-                doc = doc_by_name.get(name)
-                if doc is None:
-                    continue
-                hits[name] = Hit(entry=doc, score=0.0, reasons=[], via=[via_seed])
+            if doc is not None:
+                hits[name] = Hit(
+                    entry=doc,
+                    score=score,
+                    reasons=reasons_by_name.get(name, []),
+                    tiers=tiers_by_name.get(name, []),
+                )
+        for name, via in related.items():
+            doc = doc_by_name.get(name)
+            if doc is not None and name not in hits:
+                hits[name] = Hit(entry=doc, score=0.0, reasons=[], via=[via])
     finally:
-        if con is not None:
-            con.close()
+        if cur is not None:
+            cur.close()  # close the per-call cursor, never the shared connection
 
     ranked = sorted(hits.values(), key=lambda h: (-h.score, h.entry.rel))
     return ranked[:limit]

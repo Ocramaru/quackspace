@@ -20,7 +20,7 @@ from typing import Callable
 
 import duckdb
 
-from .catalog import DB_NAME, db_path
+from .catalog import DB_NAME, db_path, invalidate
 from .config import Config
 from .core import Space, find_root
 from .subprocess_utils import failure_message
@@ -91,6 +91,7 @@ def build_embeddings(
         if not i.is_root
     ]
 
+    invalidate(path)  # free any cached read-only connection before writing
     con = duckdb.connect(str(path))
     try:
         con.execute("INSTALL vss; LOAD vss;")
