@@ -178,9 +178,9 @@ def map() -> dict[str, Any]:
         "root": _root(),
         "folders": [dict(zip(cols, r)) for r in rows],
         "next_steps": (
-            "Pick a folder then call search(query) to find files inside it, "
-            "or sql(\"SELECT rel, name, description FROM files WHERE folder = '<folder>' ORDER BY name\") "
-            "to list its contents directly. Use `rel` as the path argument to get_file()."
+            "Pick a folder, then use sql(\"SELECT rel, name, description FROM files "
+            "WHERE folder = '<folder>' ORDER BY name\") to list its files. "
+            "Pass any `rel` value directly to get_file() to read that file."
         ),
     }
 
@@ -240,6 +240,7 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
         "root": _root(),
         "query": query,
         "limit": limit,
+        "max_limit": MAX_SEARCH_LIMIT,
         "hit_count": len(hits),
         "folder_count": len(folder_hits),
         "routed_to": routed,
@@ -251,6 +252,7 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
                 "name": h.entry.name,
                 "description": h.entry.description,
                 "tags": h.entry.tags,
+                "score": round(h.score, 4),
                 "tiers": h.tiers,
                 "related_via": h.via,
                 "stale": h.entry.stale,
@@ -259,7 +261,7 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
         ],
         "folders": [
             {
-                "path": f.folder,
+                "folder": f.folder,
                 "parent": f.parent,
                 "description": f.description,
                 "matched_by": f.via,
@@ -338,14 +340,20 @@ def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
     description, n_files, diagram, described_at) — the direct subfolders of X
     are WHERE parent = 'X' (root is ''), tags(name, tag),
     links(src, dst, dst_exists). Results are capped by `row_limit`; add SQL
-    LIMIT clauses for more precise queries."""
+    LIMIT clauses for more precise queries.
+
+    `files.rel` is the root-relative path — pass it directly to get_file() as
+    the path_or_name argument. `files.name` is the bare stem without extension
+    and may be ambiguous when multiple files share a name."""
     row_limit = _clamp(row_limit, LIMITS.sql_rows, MAX_SQL_ROW_LIMIT)
     cols, rows, truncated = _query_limited(query, row_limit)
+    records = [dict(zip(cols, r)) for r in rows]
     result: dict[str, Any] = {
         "root": _root(),
         "query": query,
         "columns": cols,
         "rows": [list(r) for r in rows],
+        "records": records,
         "row_count": len(rows),
         "row_limit": row_limit,
         "truncated": truncated,
@@ -353,7 +361,12 @@ def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
     if truncated:
         result["next_steps"] = (
             f"Result capped at {row_limit} rows. Add a SQL LIMIT clause "
-            f"or pass a higher row_limit (max {MAX_SQL_ROW_LIMIT}) to get more."
+            f"or pass a higher row_limit (max {MAX_SQL_ROW_LIMIT}) to get more. "
+            "If rows contain files.rel, pass that value to get_file() to read a file."
+        )
+    else:
+        result["next_steps"] = (
+            "If records contain a `rel` field, pass it to get_file(path_or_name=rel) to read a file."
         )
     return result
 
@@ -363,7 +376,11 @@ def graph_path(src: str, dst: str) -> dict[str, Any]:
     """Shortest wikilink path between two files, identified by name. Use after
     search() or get_file() when you already have two specific file names and want
     to understand how they are connected. Returns node names on the path, or null
-    if they are not reachable from each other."""
+    if they are not reachable from each other.
+
+    Note: `path` contains file *names* (bare stems), not root-relative paths.
+    Pass each name to get_file(path_or_name=name) to read it, or use
+    sql(\"SELECT rel FROM files WHERE name = '<name>'\") to resolve it to a path."""
     path = graph_mod.shortest_path(src, dst, explicit_root=_root_arg())
     return {
         "root": _root(),
@@ -371,6 +388,13 @@ def graph_path(src: str, dst: str) -> dict[str, Any]:
         "dst": dst,
         "connected": path is not None,
         "path": path,
+        "next_steps": (
+            "Nodes in `path` are file names. Call get_file(path_or_name=name) on "
+            "any node to read it, or search(name) to locate it if name is ambiguous."
+        ) if path else (
+            "No wikilink connection found. Try central() to find hub files, or "
+            "clusters() to see whether src and dst belong to different topic islands."
+        ),
     }
 
 
@@ -384,6 +408,7 @@ def central(limit: int | None = None) -> dict[str, Any]:
     return {
         "root": _root(),
         "limit": limit,
+        "max_limit": MAX_CENTRAL_LIMIT,
         "hubs": [{"name": n, "path": r, "degree": d} for n, r, d in rows],
         "next_steps": (
             "Call get_file(path) on any hub to read it, or graph_path(src, dst) "
@@ -397,7 +422,14 @@ def clusters() -> dict[str, Any]:
     """Connected components of the wikilink graph. Use to discover topic islands
     (groups of inter-linked files) and orphan files (singletons with no links).
     Complements search() when you want topological structure rather than relevance."""
-    return {"root": _root(), "clusters": graph_mod.components(explicit_root=_root_arg())}
+    return {
+        "root": _root(),
+        "clusters": graph_mod.components(explicit_root=_root_arg()),
+        "next_steps": (
+            "Each cluster is a list of file names. Call get_file(path_or_name=name) "
+            "to read any file, or central() to find the most-connected hub within a cluster."
+        ),
+    }
 
 
 @mcp.tool()
@@ -406,10 +438,12 @@ def describe(
 ) -> dict[str, Any]:
     """Record a description + tags for one file you already understand, into the
     editable .index.yaml store (the file itself is not modified). Use this to
-    annotate a repo you already know without re-reading every file. `path` is a
-    root-relative path or a bare file name. After a batch of describe() calls,
-    call reindex() once so the changes show up in search/sql/map, then embed()
-    to refresh semantic search."""
+    annotate a repo you already know without re-reading every file.
+
+    `path` accepts a root-relative path (preferred — unambiguous) or a bare file
+    name. Prefer the `rel` value from search/sql results to avoid name collisions.
+    After a batch of describe() calls, call reindex() once so changes show up in
+    search/sql/map, then embed() to refresh semantic search."""
     from . import generate
 
     rel = generate.record(_root_arg(), path, description, list(tags or []))
