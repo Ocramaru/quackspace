@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from quack.gitignore import BLOCK_END, BLOCK_START, ensure_gitignore
+from quack.gitignore import (
+    BLOCK_END,
+    BLOCK_START,
+    ensure_gitignore,
+    _find_descendant_git_roots,
+)
 
 
 def _make_git_repo(path: Path) -> Path:
@@ -187,3 +192,76 @@ def test_scaffold_leaves_no_quack_artifacts_in_git_status(tmp_path):
     )
     lines = [ln for ln in result.stdout.splitlines() if ".quack/" in ln]
     assert not lines, f"Unexpected quack state in git status: {result.stdout}"
+
+
+# ---------------------------------------------------------------------------
+# Nested git repos — managed block applied to each (GH#11)
+# ---------------------------------------------------------------------------
+
+def test_find_descendant_git_roots(tmp_path):
+    quack_root = _make_quack_root(tmp_path / "space")
+    alpha = quack_root / "projects" / "alpha"
+    beta = quack_root / "projects" / "beta"
+    _make_git_repo(alpha)
+    _make_git_repo(beta)
+
+    found = _find_descendant_git_roots(quack_root)
+    assert set(found) == {alpha, beta}
+
+
+def test_nested_git_repos_get_managed_block(tmp_path):
+    quack_root = _make_quack_root(tmp_path / "space")
+    alpha = _make_git_repo(quack_root / "projects" / "alpha")
+    beta = _make_git_repo(quack_root / "projects" / "beta")
+    ensure_gitignore(quack_root)
+
+    for repo in (alpha, beta):
+        content = (repo / ".gitignore").read_text()
+        assert BLOCK_START in content
+        assert BLOCK_END in content
+        assert "_diagrams.md" in content
+        # Nested repos should not contain QUACK.md or .quack/ patterns.
+        assert "QUACK.md" not in content
+        assert ".quack/" not in content
+
+
+def test_nested_git_repo_block_idempotent(tmp_path):
+    quack_root = _make_quack_root(tmp_path / "space")
+    alpha = _make_git_repo(quack_root / "projects" / "alpha")
+    ensure_gitignore(quack_root)
+    first = (alpha / ".gitignore").read_text()
+    ensure_gitignore(quack_root)
+    second = (alpha / ".gitignore").read_text()
+    assert first == second
+    assert first.count(BLOCK_START) == 1
+
+
+def test_nested_git_repo_preserves_user_lines(tmp_path):
+    quack_root = _make_quack_root(tmp_path / "space")
+    alpha = _make_git_repo(quack_root / "projects" / "alpha")
+    (alpha / ".gitignore").write_text("*.log\nbuild/\n")
+    ensure_gitignore(quack_root)
+    content = (alpha / ".gitignore").read_text()
+    assert "*.log" in content
+    assert "build/" in content
+    assert BLOCK_START in content
+
+
+def test_quack_root_not_in_git_nested_repos_still_get_block(tmp_path):
+    """Quack root outside any git repo: nested repos still get the block."""
+    quack_root = _make_quack_root(tmp_path / "space")  # no parent .git
+    alpha = _make_git_repo(quack_root / "projects" / "alpha")
+    ensure_gitignore(quack_root)
+    content = (alpha / ".gitignore").read_text()
+    assert BLOCK_START in content
+    assert "_diagrams.md" in content
+
+
+def test_opt_out_skips_nested_repos(tmp_path):
+    quack_root = _make_quack_root(tmp_path / "space")
+    alpha = _make_git_repo(quack_root / "projects" / "alpha")
+    (quack_root / ".quack" / "config.yaml").write_text(
+        yaml.safe_dump({"gitignore": False})
+    )
+    ensure_gitignore(quack_root)
+    assert not (alpha / ".gitignore").exists()
