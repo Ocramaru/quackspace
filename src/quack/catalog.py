@@ -369,6 +369,27 @@ def invalidate(path: Path | None = None) -> None:
                     pass
 
 
+def read_cursor(explicit_root: str | None = None) -> duckdb.DuckDBPyConnection:
+    """A cursor off the cached read-only connection — for read queries in a
+    long-lived process (the MCP server), so the catalog file is opened once and
+    reused. **Close the returned cursor**, never the shared connection; the
+    cursor also isolates concurrent calls. Raises if there is no catalog."""
+    return shared_connection(resolve_db(explicit_root)).cursor()
+
+
+def query_shared(
+    sql: str, explicit_root: str | None = None
+) -> tuple[list[str], list[tuple]]:
+    """Like :func:`query` but on the cached connection (MCP hot path)."""
+    cur = read_cursor(explicit_root)
+    try:
+        c = cur.execute(sql)
+        cols = [d[0] for d in c.description] if c.description else []
+        return cols, c.fetchall()
+    finally:
+        cur.close()
+
+
 def query(sql: str, explicit_root: str | None = None) -> tuple[list[str], list[tuple]]:
     """Run a SQL query against the catalog. Returns (column_names, rows)."""
     con = connect(explicit_root)

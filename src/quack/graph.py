@@ -12,7 +12,7 @@ not depend on it.
 
 from __future__ import annotations
 
-from .catalog import connect
+from .catalog import read_cursor
 
 # Undirected edge view used by every traversal below.
 _EDGE_CTE = """
@@ -30,7 +30,7 @@ def shortest_path(
     """Return the node names on a shortest path src..dst, or None if none."""
     if src == dst:
         return [src]
-    con = connect(explicit_root)
+    con = read_cursor(explicit_root)
     try:
         row = con.execute(
             f"""
@@ -59,7 +59,7 @@ def centrality(
     Degree (inbound + outbound, existing edges) is the cheap, robust signal;
     it is what makes a file a hub. Returns the top `limit`.
     """
-    con = connect(explicit_root)
+    con = read_cursor(explicit_root)
     try:
         return con.execute(
             f"""
@@ -83,7 +83,7 @@ def components(explicit_root: str | None = None) -> list[list[str]]:
     (the norm once quack indexes whole repos) are omitted rather than reported
     as thousands of singletons. Returns a list of name-lists, largest first.
     """
-    con = connect(explicit_root)
+    con = read_cursor(explicit_root)
     try:
         # Label-propagation seeded from linked nodes only: each node's component
         # id is the min node name reachable from it. Iterate to a fixed point.

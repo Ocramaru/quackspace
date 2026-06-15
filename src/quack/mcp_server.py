@@ -138,14 +138,15 @@ def _truncate(text: str, limit: int) -> tuple[str, bool]:
 
 
 def _query_limited(query: str, row_limit: int) -> tuple[list[str], list[tuple], bool]:
-    con = catalog.connect(_root_arg())
+    # Cached connection (reused across MCP calls); close the cursor, not it.
+    cur = catalog.read_cursor(_root_arg())
     try:
-        cur = con.execute(query)
+        cur.execute(query)
         cols = [d[0] for d in cur.description] if cur.description else []
         rows = cur.fetchmany(row_limit + 1)
         return cols, rows[:row_limit], len(rows) > row_limit
     finally:
-        con.close()
+        cur.close()
 
 
 def _root() -> str:
@@ -156,7 +157,7 @@ def _root() -> str:
 def map() -> dict[str, Any]:
     """Folder-level overview of the root: each folder and its file count. Start
     here to decide which folder is relevant."""
-    cols, rows = catalog.query(
+    cols, rows = catalog.query_shared(
         "SELECT folder, count(*) AS files FROM files "
         "WHERE folder <> '' GROUP BY folder ORDER BY files DESC",
         explicit_root=_root_arg(),
