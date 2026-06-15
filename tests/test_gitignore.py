@@ -34,10 +34,12 @@ def _make_quack_root(path: Path) -> Path:
 
 def test_self_ignore_created(tmp_path):
     root = _make_quack_root(tmp_path / "space")
-    ensure_gitignore(root)
+    summary = ensure_gitignore(root)
     self_ignore = root / ".quack" / ".gitignore"
     assert self_ignore.exists()
     assert self_ignore.read_text().strip() == "*"
+    assert self_ignore in summary.updated
+    assert summary.updated_count >= 1
 
 
 def test_self_ignore_rewritten_if_wrong(tmp_path):
@@ -64,7 +66,7 @@ def test_no_git_repo_no_gitignore_written(tmp_path):
 def test_creates_gitignore_when_absent(tmp_path):
     git_root = _make_git_repo(tmp_path / "repo")
     quack_root = _make_quack_root(git_root)
-    ensure_gitignore(quack_root)
+    summary = ensure_gitignore(quack_root)
 
     gi = git_root / ".gitignore"
     assert gi.exists()
@@ -75,6 +77,9 @@ def test_creates_gitignore_when_absent(tmp_path):
     assert "_diagrams.md" in content
     assert "QUACK.md" in content
     assert ".quack/" in content
+    assert gi in summary.updated
+    assert git_root in summary.protected
+    assert "protected 1 git repo" in summary.format(quack_root)
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +199,28 @@ def test_scaffold_leaves_no_quack_artifacts_in_git_status(tmp_path):
     assert not lines, f"Unexpected quack state in git status: {result.stdout}"
 
 
+def test_scaffold_reports_progress_and_gitignore_summary(tmp_path):
+    git_root = _make_git_repo(tmp_path / "repo")
+    calls: list[tuple[int, int, str]] = []
+    summaries = []
+
+    from quack.scaffold import scaffold_root
+
+    root = scaffold_root(
+        str(git_root),
+        progress=lambda done, total, message: calls.append((done, total, message)),
+        gitignore_summary=summaries,
+    )
+
+    assert root == git_root.resolve()
+    assert calls[0] == (0, 5, "Preparing space")
+    assert (3, 5, "Managing gitignore") in calls
+    assert calls[-1] == (5, 5, "Scaffolded space")
+    assert len(summaries) == 1
+    assert root in summaries[0].protected
+    assert "protected" in summaries[0].format(root)
+
+
 # ---------------------------------------------------------------------------
 # Nested git repos — managed block applied to each (GH#11)
 # ---------------------------------------------------------------------------
@@ -209,11 +236,28 @@ def test_find_descendant_git_roots(tmp_path):
     assert set(found) == {alpha, beta}
 
 
+def test_find_descendant_git_roots_skips_ignored_heavy_dirs(tmp_path):
+    quack_root = _make_quack_root(tmp_path / "space")
+    visible = _make_git_repo(quack_root / "projects" / "visible")
+    hidden = _make_git_repo(quack_root / "node_modules" / "hidden")
+
+    found, scanned, skipped = _find_descendant_git_roots(
+        quack_root,
+        patterns={"node_modules"},
+        with_stats=True,
+    )
+
+    assert found == [visible]
+    assert hidden not in found
+    assert scanned >= 2
+    assert skipped >= 1
+
+
 def test_nested_git_repos_get_managed_block(tmp_path):
     quack_root = _make_quack_root(tmp_path / "space")
     alpha = _make_git_repo(quack_root / "projects" / "alpha")
     beta = _make_git_repo(quack_root / "projects" / "beta")
-    ensure_gitignore(quack_root)
+    summary = ensure_gitignore(quack_root)
 
     for repo in (alpha, beta):
         content = (repo / ".gitignore").read_text()
@@ -223,6 +267,8 @@ def test_nested_git_repos_get_managed_block(tmp_path):
         # Nested repos should not contain QUACK.md or .quack/ patterns.
         assert "QUACK.md" not in content
         assert ".quack/" not in content
+    assert {alpha, beta}.issubset(set(summary.protected))
+    assert summary.updated_count >= 3  # .quack/.gitignore + two nested repos
 
 
 def test_nested_git_repo_block_idempotent(tmp_path):
@@ -263,5 +309,7 @@ def test_opt_out_skips_nested_repos(tmp_path):
     (quack_root / ".quack" / "config.yaml").write_text(
         yaml.safe_dump({"gitignore": False})
     )
-    ensure_gitignore(quack_root)
+    summary = ensure_gitignore(quack_root)
     assert not (alpha / ".gitignore").exists()
+    assert summary.opted_out is True
+    assert "gitignore: false" in summary.format(quack_root)

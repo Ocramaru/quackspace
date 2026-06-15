@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import datetime as _dt
 from pathlib import Path
+from typing import Callable
 
 import frontmatter
 import yaml
 
 from .core import MARKER_DIR, find_root
+from .gitignore import GitignoreSummary
 
 TEMPLATE_KEYS = ("description", "tags", "created", "updated")
 
@@ -132,7 +134,11 @@ def _merge_defaults(config_path: Path, defaults: dict | None) -> None:
     config_path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
 
-def scaffold_root(target: str | None = None) -> Path:
+def scaffold_root(
+    target: str | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
+    gitignore_summary: list[GitignoreSummary] | None = None,
+) -> Path:
     """Turn a directory into a quack root, creating it if needed. Writes only
     what is missing, so it is safe to re-run on an existing space.
 
@@ -140,6 +146,11 @@ def scaffold_root(target: str | None = None) -> Path:
     navigation anchor, and a `.quackignore`. Starter content folders are created
     only for a brand-new (empty) space, never inside an existing project.
     """
+    def report(done: int, message: str) -> None:
+        if progress is not None:
+            progress(done, 5, message)
+
+    report(0, "Preparing space")
     root = Path(target).expanduser().resolve() if target else Path.cwd().resolve()
     is_new = not root.exists() or not any(root.iterdir())
     (root / ".quack").mkdir(parents=True, exist_ok=True)
@@ -147,6 +158,7 @@ def scaffold_root(target: str | None = None) -> Path:
         for folder in STARTER_FOLDERS:
             (root / folder).mkdir(parents=True, exist_ok=True)
 
+    report(1, "Writing navigation files")
     qmd = root / "QUACK.md"
     if not qmd.exists():
         qmd.write_text(ROOT_QUACK_MD)
@@ -154,6 +166,7 @@ def scaffold_root(target: str | None = None) -> Path:
     if not ign.exists():
         ign.write_text(ROOT_QUACKIGNORE)
 
+    report(2, "Writing config")
     cfg = root / ".quack" / "config.yaml"
     if not cfg.exists():
         from .config import write_config  # neutral default; `quack setup` picks
@@ -164,7 +177,11 @@ def scaffold_root(target: str | None = None) -> Path:
 
     from .gitignore import ensure_gitignore
 
-    ensure_gitignore(root)
+    report(3, "Managing gitignore")
+    summary = ensure_gitignore(root, progress=progress)
+    if gitignore_summary is not None:
+        gitignore_summary.append(summary)
+    report(5, "Scaffolded space")
     return root
 
 

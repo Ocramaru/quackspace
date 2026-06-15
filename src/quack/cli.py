@@ -691,8 +691,16 @@ def _dispatch(argv: list[str] | None) -> int:
         from ._duck import swimming
         from .scaffold import scaffold_root
 
-        root = scaffold_root(args.dir or args.root)
+        gitignore_summaries = []
+        with swimming("Scaffolding", total=5) as progress:
+            root = scaffold_root(
+                args.dir or args.root,
+                progress=progress.update,
+                gitignore_summary=gitignore_summaries,
+            )
         print(f"✓ scaffolded space at {root}")
+        if gitignore_summaries:
+            print(f"  {gitignore_summaries[-1].format(root)}")
         with swimming("Reindexing") as progress:
             summary = reindex(str(root), progress=progress.update)
         print(f"  reindexed {summary['files']} file(s)")
