@@ -113,8 +113,11 @@ def test_scale_incremental_tiers(tmp_path):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.perf
-def test_perf_reindex_and_search(tmp_path, capsys):
-    root, _ = _make_space(tmp_path, 1000)
+def test_perf_reindex_and_search(tmp_path, capsys, perf_files):
+    """Timing benchmark. Scale the corpus with `pytest -m perf --perf-files N`
+    (or $QUACK_PERF_FILES); defaults to 1000 files."""
+    n = perf_files
+    root, _ = _make_space(tmp_path, n)
 
     t = time.perf_counter()
     reindex(str(root))
@@ -125,18 +128,19 @@ def test_perf_reindex_and_search(tmp_path, capsys):
     noop = time.perf_counter() - t
 
     search("topic3", explicit_root=str(root))  # warm
+    token = f"zql{n - 1}"  # a token that exists for any n >= 1
     t = time.perf_counter()
     for _ in range(10):
-        search("topic3 zql42", explicit_root=str(root))
+        search(f"topic3 {token}", explicit_root=str(root))
     srch = (time.perf_counter() - t) / 10
 
     with capsys.disabled():
         print(
-            f"\n[perf] 1000 files — full reindex {full * 1000:.0f}ms, "
+            f"\n[perf] {n} files — full reindex {full * 1000:.0f}ms, "
             f"no-op {noop * 1000:.0f}ms, search {srch * 1000:.1f}ms"
         )
 
-    # Generous ceilings: catch gross regressions without being flaky on slow CI.
-    assert full < 10.0
-    assert noop < 3.0
+    # Generous, count-scaled ceilings: catch gross regressions without flaking.
+    assert full < max(10.0, n / 100)
+    assert noop < max(3.0, n / 500)
     assert srch < 2.0
