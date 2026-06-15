@@ -171,7 +171,7 @@ def _root() -> str:
 def map() -> dict[str, Any]:
     """Folder-level overview of the root: each folder with its file count and
     description. Start here to decide which folder is relevant, then call
-    get_file or search to go deeper."""
+    file_meta or search to go deeper."""
     cols, rows = catalog.query_shared(
         "SELECT f.folder, count(*) AS files, fo.description "
         "FROM files f LEFT JOIN folders fo ON f.folder = fo.folder "
@@ -196,8 +196,9 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
 
     Field semantics:
     - `tiers`: which ranking methods contributed — 'structural' (name/tag/description
-      match, always available), 'fts' (body text via BM25, always available),
-      'semantic' (vector similarity — only if embeddings were built with `quack embed`).
+      match, always available), 'fts' (full-text search over indexed content via BM25,
+      always available), 'semantic' (vector similarity — only if embeddings were built
+      with `quack embed`).
       A hit missing 'semantic' is normal when embeddings haven't been built.
     - `related_via`: non-empty when the hit was pulled in as a link-graph neighbour
       of a direct match, not matched directly itself.
@@ -223,7 +224,7 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
         )
     else:
         tiers_seen = {t for h in hits for t in h.tiers}
-        tips = ["Call file_meta(path) for metadata and the absolute path, then read with your host file tool."]
+        tips = ["Call file_meta(path_or_name=path) for metadata and absolute_path, then read with your host file tool."]
         if "semantic" not in tiers_seen:
             tips.append(
                 "No 'semantic' tier in results — embeddings haven't been built. "
@@ -237,7 +238,8 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
         if any(h.entry.stale for h in hits):
             tips.append(
                 "Some hits have stale=true — their description may be outdated. "
-                "Read the file content with get_file() before relying on the description."
+                "Call file_meta(path_or_name=path) for absolute_path, then read "
+                "with your host file tool before relying on the description."
             )
         next_steps = " ".join(tips)
 
@@ -347,7 +349,8 @@ def file_meta(path_or_name: str) -> dict[str, Any]:
         "stale": bool(stale),
         "next_steps": (
             f"Read content with your host file-reading tool at: {absolute_path!r}. "
-            "After reading, call describe(path, description, tags) to annotate what you learned."
+            "If you learn stable metadata worth recording, call describe(path, description, tags) "
+            "then reindex() once after your batch."
         ),
     }
 
@@ -356,15 +359,17 @@ def file_meta(path_or_name: str) -> dict[str, Any]:
 def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
     """Run read-only SQL against the catalog. Tables: files(name, rel, folder,
     ext, description, tags_csv, n_links, n_inbound, is_orphan, is_binary,
-    file_modified, described_at, stale, body), folders(folder, parent,
+    file_modified, described_at, stale), folders(folder, parent,
     description, n_files, diagram, described_at) — the direct subfolders of X
     are WHERE parent = 'X' (root is ''), tags(name, tag),
     links(src, dst, dst_exists). Results are capped by `row_limit`; add SQL
     LIMIT clauses for more precise queries.
 
-    `files.rel` is the root-relative path — pass it directly to get_file() as
-    the path_or_name argument. `files.name` is the bare stem without extension
-    and may be ambiguous when multiple files share a name."""
+    `files.rel` is the root-relative path — pass it directly to file_meta() as
+    path_or_name to get metadata and absolute_path. `files.name` is the bare stem
+    without extension and may be ambiguous when multiple files share a name.
+    Note: files.body is indexed for full-text search but returning it via sql()
+    bypasses host permission controls — use file_meta() + your host tool instead."""
     row_limit = _clamp(row_limit, LIMITS.sql_rows, MAX_SQL_ROW_LIMIT)
     cols, rows, truncated = _query_limited(query, row_limit)
     records = [dict(zip(cols, r)) for r in rows]
@@ -382,11 +387,12 @@ def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
         result["next_steps"] = (
             f"Result capped at {row_limit} rows. Add a SQL LIMIT clause "
             f"or pass a higher row_limit (max {MAX_SQL_ROW_LIMIT}) to get more. "
-            "If rows contain files.rel, pass that value to get_file() to read a file."
+            "If rows contain files.rel, pass that value to file_meta(path_or_name=rel) for metadata and absolute_path."
         )
     else:
         result["next_steps"] = (
-            "If records contain a `rel` field, pass it to get_file(path_or_name=rel) to read a file."
+            "If records contain a `rel` field, pass it to file_meta(path_or_name=rel) "
+            "to get metadata and absolute_path for reading with your host file tool."
         )
     return result
 
@@ -394,13 +400,13 @@ def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
 @mcp.tool()
 def graph_path(src: str, dst: str) -> dict[str, Any]:
     """Shortest wikilink path between two files, identified by name. Use after
-    search() or get_file() when you already have two specific file names and want
-    to understand how they are connected. Returns node names on the path, or null
-    if they are not reachable from each other.
+    search(), file_meta(), or sql() when you already have two specific file names
+    and want to understand how they are connected. Returns node names on the path,
+    or null if they are not reachable from each other.
 
     Note: `path` contains file *names* (bare stems), not root-relative paths.
-    Pass each name to get_file(path_or_name=name) to read it, or use
-    sql(\"SELECT rel FROM files WHERE name = '<name>'\") to resolve it to a path."""
+    Pass each name to file_meta(path_or_name=name) to get metadata and absolute_path,
+    or use sql(\"SELECT rel FROM files WHERE name = '<name>'\") to resolve to a path."""
     path = graph_mod.shortest_path(src, dst, explicit_root=_root_arg())
     return {
         "root": _root(),
@@ -431,7 +437,7 @@ def central(limit: int | None = None) -> dict[str, Any]:
         "max_limit": MAX_CENTRAL_LIMIT,
         "hubs": [{"name": n, "path": r, "degree": d} for n, r, d in rows],
         "next_steps": (
-            "Call file_meta(path) on any hub for metadata and its absolute path, "
+            "Call file_meta(path_or_name=path) on any hub for metadata and absolute_path, "
             "then read with your host file tool. Or call graph_path(src, dst) to trace connections."
         ),
     }
@@ -447,8 +453,8 @@ def clusters() -> dict[str, Any]:
         "clusters": graph_mod.components(explicit_root=_root_arg()),
         "next_steps": (
             "Each cluster is a list of file names. Call file_meta(path_or_name=name) "
-            "for metadata and the absolute path to read with your host tool, "
-            "or central() to find the most-connected hub within a cluster."
+            "for metadata and absolute_path to read with your host tool. "
+            "Use graph_path(src, dst) or sql() to inspect relationships among names in a cluster."
         ),
     }
 
@@ -462,9 +468,9 @@ def describe(
     annotate a repo you already know without re-reading every file.
 
     `path` accepts a root-relative path (preferred — unambiguous) or a bare file
-    name. Prefer the `rel` value from search/sql results to avoid name collisions.
-    After a batch of describe() calls, call reindex() once so changes show up in
-    search/sql/map, then embed() to refresh semantic search."""
+    name. Prefer `path` from search()/central() results or `rel` from sql() results
+    to avoid name collisions. After a batch of describe() calls, call reindex() once
+    so changes show up in search/sql/map, then embed() to refresh semantic search."""
     from . import generate
 
     rel = generate.record(_root_arg(), path, description, list(tags or []))
@@ -540,7 +546,7 @@ def explain() -> dict[str, Any]:
         },
         "search_tiers": {
             "structural": "name, tag, and description match — always available",
-            "fts": "full-text body search via DuckDB BM25 — always available",
+            "fts": "full-text search over indexed content via DuckDB BM25 — always available",
             "semantic": (
                 "vector similarity — only available after `quack embed` has been run. "
                 "A result with no 'semantic' tier is normal when embeddings don't exist."
@@ -559,7 +565,7 @@ def explain() -> dict[str, Any]:
             ),
         },
         "catalog_schema": {
-            "files": "name, rel, folder, ext, description, tags_csv, n_links, n_inbound, is_orphan, is_binary, file_modified, described_at, stale, body",
+            "files": "name, rel, folder, ext, description, tags_csv, n_links, n_inbound, is_orphan, is_binary, file_modified, described_at, stale",
             "folders": "folder, parent, description, n_files, diagram, described_at — subfolders of X: WHERE parent = 'X' (root = '')",
             "tags": "name, tag",
             "links": "src, dst, dst_exists",
