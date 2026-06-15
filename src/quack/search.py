@@ -56,6 +56,7 @@ class Doc:
     name: str
     description: str
     tags: list[str] = field(default_factory=list)
+    stale: bool = False
 
 
 @dataclass
@@ -289,8 +290,8 @@ def search(
             wanted = set(result_names)
             doc_rows = [r for r in fallback_rows if r[0] in wanted]
         doc_by_name = {
-            name: Doc(rel, name, desc or "", [t for t in (tags or "").split(",") if t])
-            for name, rel, desc, tags in doc_rows
+            name: Doc(rel, name, desc or "", [t for t in (tags or "").split(",") if t], bool(stale))
+            for name, rel, desc, tags, stale in doc_rows
         }
 
         hits: dict[str, Hit] = {}

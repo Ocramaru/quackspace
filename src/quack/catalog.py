@@ -942,15 +942,15 @@ def structural_candidates_on(
 
 def docs_for_names_on(
     con: duckdb.DuckDBPyConnection, names: list[str]
-) -> list[tuple[str, str, str, str]]:
+) -> list[tuple[str, str, str, str, bool]]:
     """Full short rows for a bounded set of result names (so we fetch metadata
     only for what we'll actually return). Returns [(name, rel, description,
-    tags_csv), ...]."""
+    tags_csv, stale), ...]."""
     if not names:
         return []
     ph = ",".join("?" for _ in names)
     return con.execute(
-        f"SELECT name, rel, description, tags_csv FROM files WHERE name IN ({ph})",
+        f"SELECT name, rel, description, tags_csv, stale FROM files WHERE name IN ({ph})",
         list(names),
     ).fetchall()
 

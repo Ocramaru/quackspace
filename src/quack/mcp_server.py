@@ -28,9 +28,9 @@ from .core import find_root
 from .search import search as do_search
 
 INSTRUCTIONS = """\
-This is quack, the meta layer over a directory of the user's work — any files:
-notes, docs, code, configs, assets. Use it to find and read files precisely,
-without loading the whole tree into context.
+This is quack, the meta layer over a directory of the user's work (notes, docs,
+code, configs, assets). Use it to find and read files precisely, without loading
+the whole tree into context.
 
 How to navigate (cheapest first):
 1. `map` — folder-level overview. Decides which folder is relevant.
@@ -165,16 +165,23 @@ def _root() -> str:
 
 @mcp.tool()
 def map() -> dict[str, Any]:
-    """Folder-level overview of the root: each folder and its file count. Start
-    here to decide which folder is relevant."""
+    """Folder-level overview of the root: each folder with its file count and
+    description. Start here to decide which folder is relevant, then call
+    get_file or search to go deeper."""
     cols, rows = catalog.query_shared(
-        "SELECT folder, count(*) AS files FROM files "
-        "WHERE folder <> '' GROUP BY folder ORDER BY files DESC",
+        "SELECT f.folder, count(*) AS files, fo.description "
+        "FROM files f LEFT JOIN folders fo ON f.folder = fo.folder "
+        "WHERE f.folder <> '' GROUP BY f.folder, fo.description ORDER BY files DESC",
         explicit_root=_root_arg(),
     )
     return {
         "root": _root(),
         "folders": [dict(zip(cols, r)) for r in rows],
+        "next_steps": (
+            "Pick a folder then call search(query) to find files inside it, "
+            "or sql(\"SELECT name, description FROM files WHERE folder = '<folder>'\") "
+            "to list its contents directly."
+        ),
     }
 
 
@@ -222,6 +229,11 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
                 "'related_via' on a hit means it was pulled in as a link-graph "
                 "neighbour of a direct match, not matched directly."
             )
+        if any(h.entry.stale for h in hits):
+            tips.append(
+                "Some hits have stale=true — their description was written before "
+                "the file last changed. Run `quack generate --stale` to refresh them."
+            )
         next_steps = " ".join(tips)
 
     return {
@@ -236,6 +248,7 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
                 "tags": h.entry.tags,
                 "tiers": h.tiers,
                 "related_via": h.via,
+                "stale": h.entry.stale,
             }
             for h in hits
         ],
@@ -268,7 +281,11 @@ def get_file(path_or_name: str, char_limit: int | None = None) -> dict[str, Any]
     space = Space.load(_root_arg())
     entry = space.by_name.get(path_or_name) or space.by_rel.get(path_or_name)
     if entry is None:
-        return {"root": _root(), "error": f"No file matching {path_or_name!r}."}
+        return {
+            "root": _root(),
+            "error": f"No file matching {path_or_name!r}.",
+            "next_steps": "Try search(query) to find the file, or sql(\"SELECT rel FROM files WHERE name LIKE '%<term>%'\") to locate it by name.",
+        }
     char_limit = _clamp(char_limit, LIMITS.file_chars, MAX_FILE_CHAR_LIMIT)
     content, truncated = _truncate(entry.body, char_limit)
     result: dict[str, Any] = {
@@ -305,13 +322,19 @@ def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
     LIMIT clauses for more precise queries."""
     row_limit = _clamp(row_limit, LIMITS.sql_rows, MAX_SQL_ROW_LIMIT)
     cols, rows, truncated = _query_limited(query, row_limit)
-    return {
+    result: dict[str, Any] = {
         "root": _root(),
         "columns": cols,
         "rows": [list(r) for r in rows],
         "row_limit": row_limit,
         "truncated": truncated,
     }
+    if truncated:
+        result["next_steps"] = (
+            f"Result capped at {row_limit} rows. Add a SQL LIMIT clause "
+            f"or pass a higher row_limit (max {MAX_SQL_ROW_LIMIT}) to get more."
+        )
+    return result
 
 
 @mcp.tool()
