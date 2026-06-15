@@ -115,6 +115,7 @@ def test_write_config_preserves_existing_defaults(tmp_path):
                     "sql_row_limit": 5,
                     "central_limit": 6,
                 },
+                "index": {"store_body": False},
             },
             sort_keys=False,
         )
@@ -131,3 +132,18 @@ def test_write_config_preserves_existing_defaults(tmp_path):
         "sql_row_limit": 5,
         "central_limit": 6,
     }
+    assert data["index"] == {"store_body": False}
+
+
+def test_config_loads_index_body_storage(tmp_path):
+    import yaml
+    from quack.config import Config
+
+    root = tmp_path / "space"
+    (root / ".quack").mkdir(parents=True)
+    config = root / ".quack" / "config.yaml"
+    config.write_text(yaml.safe_dump({"index": {"store_body": "false"}}))
+
+    loaded = Config.load(str(root))
+
+    assert loaded.index.store_body is False

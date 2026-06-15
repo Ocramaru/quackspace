@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Callable
 
 from . import catalog
 from .core import Space, find_root
@@ -150,6 +151,7 @@ def search(
     explicit_root: str | None = None,
     limit: int = 10,
     expand: bool = True,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> list[Hit]:
     """Auto-hybrid search: fuse every available tier, then expand on the graph.
 
@@ -168,6 +170,16 @@ def search(
     if not terms:
         return []
 
+    total_steps = 6
+    step = 0
+
+    def report(message: str) -> None:
+        nonlocal step
+        if progress is not None:
+            progress(step, total_steps, message)
+        step += 1
+
+    report("Opening catalog")
     db = find_root(explicit_root) / ".quack" / DB_NAME
     cur = None
     fallback_rows: list[tuple] | None = None
@@ -193,12 +205,14 @@ def search(
                     tiers_by_name[name].append(tier)
 
         # Tier 1: structural (short fields only; body is FTS's job).
+        report("Searching structure")
         structural = _structural_candidates(cur, fallback_rows, terms)
         add_tier("structural", [name for _s, name, _r in structural])
         for _s, name, reasons in structural:
             reasons_by_name[name] = reasons
 
         # Tier 2: FTS — on the shared connection (cur is None only pre-reindex).
+        report("Searching full text")
         if cur is not None:
             try:
                 fts = catalog.fts_on(cur, query, limit=max(limit * 2, 20))
@@ -207,6 +221,7 @@ def search(
                 pass
 
         # Tier 3: semantic via vss (skip silently if not configured/built).
+        report("Searching embeddings")
         try:
             from . import embed
             sem = embed.semantic_search(query, explicit_root, limit=max(limit * 2, 20))
@@ -218,6 +233,7 @@ def search(
         # direct hit, so expanding lower-ranked hits is wasted). Relatedness is
         # wikilink neighbours + shared tags (the latter works for code repos
         # with no [[wikilinks]]).
+        report("Expanding related files")
         related: dict[str, str] = {}
         if expand and fused and cur is not None:
             seeds = [n for n, _s in sorted(fused.items(), key=lambda kv: -kv[1])[:limit]]
@@ -235,6 +251,7 @@ def search(
                 pass
 
         # Fetch full metadata only for the bounded result set (not every file).
+        report("Loading result metadata")
         result_names = list(fused) + list(related)
         if cur is not None:
             doc_rows = catalog.docs_for_names_on(cur, result_names)
@@ -264,12 +281,17 @@ def search(
         if cur is not None:
             cur.close()  # close the per-call cursor, never the shared connection
 
+    if progress is not None:
+        progress(total_steps, total_steps, "Search complete")
     ranked = sorted(hits.values(), key=lambda h: (-h.score, h.entry.rel))
     return ranked[:limit]
 
 
 def search_folders(
-    query: str, explicit_root: str | None = None, limit: int = 10
+    query: str,
+    explicit_root: str | None = None,
+    limit: int = 10,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> list[FolderHit]:
     """Folder-level search, kept distinct from file hits. Prefers the folder
     embedding space; falls back to a structural scan over the ``folders`` table
@@ -277,6 +299,8 @@ def search_folders(
     terms = _terms(query)
     if not terms:
         return []
+    if progress is not None:
+        progress(0, 3, "Opening folder catalog")
     db = find_root(explicit_root) / ".quack" / DB_NAME
 
     # Folder descriptions, for enriching semantic hits and for the fallback.
@@ -290,6 +314,8 @@ def search_folders(
     hits: dict[str, FolderHit] = {}
 
     # Tier 1: folder embeddings (semantic), if present.
+    if progress is not None:
+        progress(1, 3, "Searching folder embeddings")
     try:
         from . import embed
 
@@ -306,6 +332,8 @@ def search_folders(
         pass
 
     # Tier 2: structural fallback over folder path + description.
+    if progress is not None:
+        progress(2, 3, "Searching folder metadata")
     if not hits:
         scored: list[tuple[float, str]] = []
         for folder, _parent, desc in folder_rows:
@@ -323,6 +351,8 @@ def search_folders(
                 via="structural",
             )
 
+    if progress is not None:
+        progress(3, 3, "Folder search complete")
     ranked = sorted(hits.values(), key=lambda h: (-h.score, h.folder))
     return ranked[:limit]
 

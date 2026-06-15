@@ -466,19 +466,28 @@ def _dispatch(argv: list[str] | None) -> int:
 
         with swimming("Reindexing") as progress:
             summary = reindex(args.root, progress=progress.update)
+            if not args.no_diagrams and summary["folder_indexes"]:
+                progress.update(message="Generating diagrams")
+                d = diagram(args.root, progress=progress.update)
+            else:
+                d = None
         print(
             f"✓ reindexed {summary['files']} files across "
             f"{summary['folder_indexes']} folder(s)\n"
             f"  map:     {summary['map']}\n"
             f"  catalog: {summary['db']}"
         )
-        if not args.no_diagrams:
-            d = diagram(args.root)
+        if d is not None:
             print(f"  diagrams: {d['folder_diagrams']} folder(s) + {d['global']}")
+        elif not args.no_diagrams:
+            print("  diagrams: skipped (no folder indexes changed)")
         return 0
 
     if args.command == "diagram":
-        d = diagram(args.root)
+        from ._duck import swimming
+
+        with swimming("Generating diagrams") as progress:
+            d = diagram(args.root, progress=progress.update)
         print(f"✓ wrote {d['folder_diagrams']} folder diagram(s)\n  global: {d['global']}")
         return 0
 
@@ -575,12 +584,17 @@ def _dispatch(argv: list[str] | None) -> int:
         return 0
 
     if args.command == "search":
+        from ._duck import paddling
+
         terms = " ".join(args.query)
         root = str(find_root(args.root))
         if args.fts:
             from . import catalog
 
-            rows = catalog.fts_search(terms, explicit_root=args.root, limit=args.limit)
+            with paddling("Searching full text") as progress:
+                progress.update(0, 1, "Searching full text")
+                rows = catalog.fts_search(terms, explicit_root=args.root, limit=args.limit)
+                progress.update(1, 1, "Search complete")
             if not rows:
                 print("No matches.")
                 return 1
@@ -594,7 +608,10 @@ def _dispatch(argv: list[str] | None) -> int:
             from .embed import EmbedNotConfigured, semantic_search
 
             try:
-                rows = semantic_search(terms, explicit_root=args.root, limit=args.limit)
+                with paddling("Searching embeddings") as progress:
+                    progress.update(0, 1, "Searching embeddings")
+                    rows = semantic_search(terms, explicit_root=args.root, limit=args.limit)
+                    progress.update(1, 1, "Search complete")
             except EmbedNotConfigured:
                 print("No embeddings. Configure `embed.command` and run `quack embed`.")
                 return 1
@@ -605,26 +622,39 @@ def _dispatch(argv: list[str] | None) -> int:
         if args.folders:
             from .search import format_folder_hits, search_folders
 
-            fhits = search_folders(terms, explicit_root=args.root, limit=args.limit)
+            with paddling("Searching folders") as progress:
+                fhits = search_folders(
+                    terms,
+                    explicit_root=args.root,
+                    limit=args.limit,
+                    progress=progress.update,
+                )
             print(f"# root: {root}  (paths below are relative to it)")
             print(format_folder_hits(fhits))
             return 0 if fhits else 1
 
         from .search import format_folder_hits, route, search_folders
 
-        hits = search(
-            terms,
-            explicit_root=args.root,
-            limit=args.limit,
-            expand=not args.no_expand,
-        )
+        with paddling("Searching") as progress:
+            hits = search(
+                terms,
+                explicit_root=args.root,
+                limit=args.limit,
+                expand=not args.no_expand,
+                progress=progress.update,
+            )
+            fhits: list = []
+            if route(terms) in ("folders", "both"):
+                fhits = search_folders(
+                    terms,
+                    explicit_root=args.root,
+                    limit=args.limit,
+                    progress=progress.update,
+                )
         print(format_hits(hits, root=root))
-        fhits: list = []
-        if route(terms) in ("folders", "both"):
-            fhits = search_folders(terms, explicit_root=args.root, limit=args.limit)
-            if fhits:
-                print("\n# folders")
-                print(format_folder_hits(fhits))
+        if fhits:
+            print("\n# folders")
+            print(format_folder_hits(fhits))
         return 0 if (hits or fhits) else 1
 
     if args.command == "sql":

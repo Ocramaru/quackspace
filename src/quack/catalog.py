@@ -71,7 +71,9 @@ def _insert_rows(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple]) 
         con.unregister("_bulk_arrow")
 
 
-def build(space: Space, folder_infos: "dict | None" = None) -> dict:
+def build(
+    space: Space, folder_infos: "dict | None" = None, *, store_body: bool = True
+) -> dict:
     """Rebuild the catalog from scratch over the loaded space. Returns a
     summary. The space already carries effective metadata (authored .index.yaml
     overlaid on each file). *folder_infos* is the shared folder resolver's
@@ -101,11 +103,12 @@ def build(space: Space, folder_infos: "dict | None" = None) -> dict:
     link_rows = []
     for e in space.entries:
         n_in = inbound.get(e.name, 0)
+        body = e.body if store_body else ""
         file_rows.append((
             e.name, e.rel, e.folder, e.ext, e.name,
             e.description, ",".join(e.tags),
             len(e.links), n_in, n_in == 0 and len(e.links) == 0,
-            e.is_binary, e.modified, e.described_at, e.stale, e.body,
+            e.is_binary, e.modified, e.described_at, e.stale, body,
         ))
         tag_rows.extend((e.name, tag) for tag in e.tags)
         link_rows.extend((e.name, dst, dst in names) for dst in e.links)
@@ -120,7 +123,7 @@ def build(space: Space, folder_infos: "dict | None" = None) -> dict:
     con = duckdb.connect(str(path))
     try:
         _create_schema(con)
-        _write_metadata(con)
+        _write_metadata(con, store_body=store_body)
         # One transaction for all inserts: DuckDB auto-commits per statement, so
         # row-by-row executemany without this commits N times and is ~8x slower.
         con.execute("BEGIN TRANSACTION")
@@ -256,8 +259,9 @@ def _build_fts(con: duckdb.DuckDBPyConnection) -> None:
     )
 
 
-def _write_metadata(con: duckdb.DuckDBPyConnection) -> None:
+def _write_metadata(con: duckdb.DuckDBPyConnection, *, store_body: bool = True) -> None:
     con.execute("INSERT INTO metadata VALUES ('schema_version', ?)", [str(SCHEMA_VERSION)])
+    con.execute("INSERT INTO metadata VALUES ('store_body', ?)", ["true" if store_body else "false"])
     con.execute(
         "INSERT INTO metadata VALUES ('built_at', ?)",
         [datetime.now().isoformat(timespec="seconds")],
@@ -294,6 +298,25 @@ def recover_message(path: Path) -> str:
         "delete it or run `quack reindex` to rebuild it from source files and "
         ".index.yaml metadata."
     )
+
+
+def store_body_matches(path: Path, expected: bool) -> bool:
+    """Whether the existing catalog was built with the requested body storage."""
+    if not path.exists():
+        return False
+    try:
+        con = duckdb.connect(str(path), read_only=True)
+        try:
+            row = con.execute(
+                "SELECT value FROM metadata WHERE key = 'store_body'"
+            ).fetchone()
+        finally:
+            con.close()
+    except Exception:
+        return False
+    if row is None:
+        return False
+    return str(row[0]).strip().lower() == ("true" if expected else "false")
 
 
 def connect_path(path: Path) -> duckdb.DuckDBPyConnection:

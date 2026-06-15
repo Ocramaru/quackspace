@@ -97,7 +97,9 @@ n_inbound, is_orphan, is_binary, file_modified, described_at, stale, body),
 direct subfolders of X are `WHERE parent = 'X'` (root is `''`), mirroring the
 `directories:` sections 1:1 — `tags(name, tag)`, and
 `links(src, dst, dst_exists)`, plus a BM25 full-text index over
-name/description/body. (`stale` is true when a file changed after its
+name/description/body. Set `index.store_body: false` in `.quack/config.yaml`
+and run `quack reindex` to leave `files.body` empty and limit catalog full-text
+search to names/descriptions. (`stale` is true when a file changed after its
 description was written — see `quack generate --stale`.) With `quack embed`,
 files and folders get **separate** vector tables (`embeddings` and
 `folder_embeddings`); `quack search` routes where/which-folder questions to the

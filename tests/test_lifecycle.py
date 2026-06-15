@@ -52,6 +52,66 @@ def test_scaffold_new_note_reindex_catalog_search_graph_doctor_and_diagram(sampl
     assert (root / "projects" / "_diagrams.md").exists()
 
 
+def test_search_reports_tier_progress(sample_space):
+    root = sample_space
+    reindex(str(root))
+    calls: list[tuple[int, int, str]] = []
+
+    hits = search(
+        "regex",
+        explicit_root=str(root),
+        expand=False,
+        progress=lambda done, total, message: calls.append((done, total, message)),
+    )
+
+    assert hits and hits[0].entry.rel == "projects/alpha.md"
+    messages = [message for _done, _total, message in calls]
+    assert "Opening catalog" in messages
+    assert "Searching structure" in messages
+    assert "Searching full text" in messages
+    assert "Searching embeddings" in messages
+    assert "Search complete" in messages
+    assert calls[-1] == (6, 6, "Search complete")
+
+
+def test_reindex_fast_noop_reports_file_progress(sample_space):
+    root = sample_space
+    reindex(str(root))
+    calls: list[tuple[int, int, str]] = []
+
+    summary = reindex(
+        str(root),
+        progress=lambda done, total, message: calls.append((done, total, message)),
+    )
+
+    assert summary["folder_indexes"] == 0
+    assert summary["files"] == 3
+    assert calls[0] == (0, 3, "Checking files")
+    assert calls[-1][0] == 3
+    assert calls[-1][1] == 3
+    assert calls[-1][2].startswith("Checking ")
+
+
+def test_reindex_reports_post_scan_phases(sample_space):
+    root = sample_space
+    calls: list[tuple[int, int, str]] = []
+
+    reindex(
+        str(root),
+        progress=lambda done, total, message: calls.append((done, total, message)),
+    )
+
+    assert (0, 1, "Counting files") in calls
+    assert (1, 1, "Counted files") in calls
+    assert (0, 1, "Loading file contents") in calls
+    assert (0, 1, "Applying metadata") in calls
+    assert (1, 1, "Applied metadata") in calls
+    assert (0, 1, "Resolving folder metadata") in calls
+    assert (1, 1, "Resolved folder metadata") in calls
+    assert (0, 1, "Checking catalog changes") in calls
+    assert (1, 1, "Checked catalog changes") in calls
+
+
 def test_index_store_preserves_authored_fields_and_record_updates_metadata(sample_space):
     root = sample_space
     reindex(str(root))
@@ -103,6 +163,34 @@ def test_reindex_survives_malformed_frontmatter(sample_space):
     )
     assert rows and rows[0][0] == "projects/broken.md"
     assert "real content" in rows[0][1]
+
+
+def test_reindex_can_disable_body_storage(sample_space):
+    root = sample_space
+    token = "privatebodytoken"
+    (root / "projects" / "private.md").write_text(f"# Private\n\n{token}\n")
+    reindex(str(root))
+
+    _, rows = catalog.query(
+        "SELECT body FROM files WHERE rel = 'projects/private.md'",
+        explicit_root=str(root),
+    )
+    assert token in rows[0][0]
+    assert search(token, explicit_root=str(root), expand=False)
+
+    config = yaml.safe_load((root / ".quack" / "config.yaml").read_text())
+    config["index"] = {"store_body": False}
+    write_yaml(root / ".quack" / "config.yaml", config)
+
+    summary = reindex(str(root))
+
+    assert summary["catalog"] == "full"
+    _, rows = catalog.query(
+        "SELECT body FROM files WHERE rel = 'projects/private.md'",
+        explicit_root=str(root),
+    )
+    assert rows[0][0] == ""
+    assert search(token, explicit_root=str(root), expand=False) == []
 
 
 def test_parse_meta_accepts_json_and_falls_back_to_text():
