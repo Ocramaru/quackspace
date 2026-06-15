@@ -61,6 +61,14 @@ fallback-version = "0.0.0"
 [tool.hatch.build.targets.wheel]
 packages = ["src/quack"]
 
+[tool.pytest.ini_options]
+# `perf` marks timing benchmarks; deselected by default (opt in with
+# `pytest -m perf`) so the normal suite stays fast and non-flaky.
+addopts = "-m 'not perf'"
+markers = [
+    "perf: timing benchmark, run with `pytest -m perf`",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
