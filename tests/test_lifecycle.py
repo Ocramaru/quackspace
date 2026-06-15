@@ -52,6 +52,28 @@ def test_scaffold_new_note_reindex_catalog_search_graph_doctor_and_diagram(sampl
     assert (root / "projects" / "_diagrams.md").exists()
 
 
+def test_search_reports_tier_progress(sample_space):
+    root = sample_space
+    reindex(str(root))
+    calls: list[tuple[int, int, str]] = []
+
+    hits = search(
+        "regex",
+        explicit_root=str(root),
+        expand=False,
+        progress=lambda done, total, message: calls.append((done, total, message)),
+    )
+
+    assert hits and hits[0].entry.rel == "projects/alpha.md"
+    messages = [message for _done, _total, message in calls]
+    assert "Opening catalog" in messages
+    assert "Searching structure" in messages
+    assert "Searching full text" in messages
+    assert "Searching embeddings" in messages
+    assert "Search complete" in messages
+    assert calls[-1] == (6, 6, "Search complete")
+
+
 def test_index_store_preserves_authored_fields_and_record_updates_metadata(sample_space):
     root = sample_space
     reindex(str(root))

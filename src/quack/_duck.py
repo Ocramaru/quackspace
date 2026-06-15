@@ -711,6 +711,106 @@ def swimming(
     return DuckProgress(message=message, total=total, force=enabled)
 
 
+_PADDLE_SPINNER = ("|", "/", "-", "\\")
+
+
+def _paddling_frame(frame: int, message: str) -> str:
+    spinner = _PADDLE_SPINNER[frame % len(_PADDLE_SPINNER)]
+    tail = _TAILS[(frame // 2) % len(_TAILS)]
+    return (
+        f"[gold1]<(o )___[/][gold1]{tail}[/] "
+        f"[bold cyan]{spinner}[/] [dim]{message}[/]"
+    )
+
+
+@dataclass
+class PaddlingProgress:
+    """Compact one-line progress handle for short operations."""
+
+    message: str
+    force: bool | None = None
+    refresh_per_second: int = 10
+
+    def __post_init__(self) -> None:
+        self.done: int | None = None
+        self.total: int | None = None
+        self._live = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "PaddlingProgress":
+        if not enabled(self.force):
+            return self
+        try:
+            from rich.console import Console
+            from rich.live import Live
+        except ImportError:
+            return self
+
+        console = Console(stderr=True)
+        self._render_markup = console.render_str
+        self._live = Live(
+            console=console,
+            refresh_per_second=self.refresh_per_second,
+            transient=True,
+        )
+        self._live.__enter__()
+        self._thread = threading.Thread(target=self._animate, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+        if self._live is not None:
+            self._live.__exit__(exc_type, exc, tb)
+
+    def update(
+        self,
+        done: int | None = None,
+        total: int | None = None,
+        message: str | None = None,
+    ) -> None:
+        with self._lock:
+            if done is not None:
+                self.done = done
+            if total is not None:
+                self.total = total
+            if message is not None:
+                self.message = message
+
+    def _animate(self) -> None:
+        assert self._live is not None
+        delay = 1 / max(self.refresh_per_second, 1)
+        last_frame: str | None = None
+        for i in itertools.count():
+            if self._stop.is_set():
+                return
+            with self._lock:
+                progress = ""
+                if self.done is not None:
+                    progress = f" [{self.done}"
+                    if self.total is not None:
+                        progress += f"/{self.total}"
+                    progress += "]"
+                frame = _paddling_frame(i, f"{self.message}{progress}")
+            if frame != last_frame:
+                self._live.update(self._render_markup(frame))
+                last_frame = frame
+            time.sleep(delay)
+
+
+def paddling(
+    message: str,
+    *,
+    enabled: bool | None = None,
+) -> PaddlingProgress:
+    """Animate a compact one-line duck for short human-facing waits."""
+    return PaddlingProgress(message=message, force=enabled)
+
+
 @contextlib.contextmanager
 def disabled():
     """Temporarily silence duck animations in this process."""

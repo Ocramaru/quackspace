@@ -48,6 +48,16 @@ def test_swimming_noops_when_disabled():
     assert progress.refresh_per_second == 10
 
 
+def test_paddling_noops_when_disabled():
+    with _duck.paddling("Searching", enabled=False) as progress:
+        progress.update(done=1, total=2, message="Searching full text")
+
+    assert progress.done == 1
+    assert progress.total == 2
+    assert progress.message == "Searching full text"
+    assert progress.refresh_per_second == 10
+
+
 def test_family_state_adds_ducks_from_right_after_interval():
     family = _duck._FamilyState.create(
         refresh_per_second=1,
