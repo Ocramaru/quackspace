@@ -33,11 +33,13 @@ This is quack, the meta layer over a directory of the user's work (notes, docs,
 code, configs, assets). Use it to find and navigate files precisely.
 
 How to navigate (cheapest first):
-1. `map` — folder-level overview. Decides which folder is relevant.
+1. `map` — folder-level overview. Shows folders, not files. To list files inside
+   a folder, follow up with sql("SELECT rel, name, description FROM files WHERE
+   folder = '<folder>' ORDER BY name"), then pass any `rel` to `file_meta`.
 2. `search` — auto-hybrid (keyword + full-text + semantic if available + graph
    neighbours). This is the default way to find files; you do not pick a mode.
 3. `file_meta` — description, tags, links, stale flag, and the absolute path for
-   a specific file. quack never reads file content — use the `absolute_path` it
+   a specific file. quack never returns file content — use the `absolute_path` it
    returns with your host's own file-reading tool so reads go through your normal
    permission flow.
 4. `sql` / `graph_path` / `central` / `clusters` — precise structural queries.
@@ -221,6 +223,12 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
             "No results. Try broader or different terms. "
             "If you recently called describe(), call reindex() first — "
             "the catalog won't reflect new descriptions until then."
+        )
+    elif not hits and folder_hits:
+        next_steps = (
+            "Folder matches found but no file hits. "
+            "Use sql(\"SELECT rel, name, description FROM files WHERE folder = '<folder>' ORDER BY name\") "
+            "to list files inside a matched folder, then call file_meta(path_or_name=rel)."
         )
     else:
         tiers_seen = {t for h in hits for t in h.tiers}
@@ -446,7 +454,8 @@ def central(limit: int | None = None) -> dict[str, Any]:
 @mcp.tool()
 def clusters() -> dict[str, Any]:
     """Connected components of the wikilink graph. Use to discover topic islands
-    (groups of inter-linked files) and orphan files (singletons with no links).
+    (groups of inter-linked files) and isolated files (singletons — files with no
+    wikilink edges at all, distinct from files.is_orphan which tracks inbound links).
     Complements search() when you want topological structure rather than relevance."""
     return {
         "root": _root(),
@@ -469,8 +478,9 @@ def describe(
 
     `path` accepts a root-relative path (preferred — unambiguous) or a bare file
     name. Prefer `path` from search()/central() results or `rel` from sql() results
-    to avoid name collisions. After a batch of describe() calls, call reindex() once
-    so changes show up in search/sql/map, then embed() to refresh semantic search."""
+    to avoid name collisions — bare names are accepted only when unique across the
+    space. After a batch of describe() calls, call reindex() once so changes show
+    up in search/sql/map, then embed() to refresh semantic search."""
     from . import generate
 
     rel = generate.record(_root_arg(), path, description, list(tags or []))
@@ -527,8 +537,9 @@ def explain() -> dict[str, Any]:
         ),
         "data_flow": (
             "describe() writes into .index.yaml (the editable store). "
-            "reindex() rebuilds .quack/quack.duckdb from those files. "
-            "search/sql/map/file_meta all read from the catalog — never from the filesystem. "
+            "reindex() scans the filesystem to rebuild .quack/quack.duckdb. "
+            "search/sql/map/file_meta all read from the catalog — MCP tool results "
+            "never include file content, only indexed metadata. "
             "The catalog is derived and never authoritative — delete it and "
             "reindex() rebuilds it from scratch."
         ),
