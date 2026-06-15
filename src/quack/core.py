@@ -15,15 +15,32 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
 from pathlib import Path
+from typing import Callable
 
 import frontmatter
 
 # Marker directory that identifies a quack root (like .git for a repo).
 MARKER_DIR = ".quack"
 
-# Always-ignored dirs (quack state + common noise). Users extend this with a
-# `.quackignore` file at the root; these built-ins are never indexable.
-DEFAULT_IGNORED_DIRS = {".quack", ".obsidian", ".git", ".trash", "node_modules"}
+# Always-ignored dirs: quack state plus pure noise/derived caches. These are
+# never walked and never appear in the meta layer. Users extend this with a
+# `.quackignore` file at the root.
+DEFAULT_IGNORED_DIRS = {
+    ".quack", ".obsidian", ".git", ".trash",
+    "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".cache",
+}
+
+# Opaque dirs: heavy, unambiguous vendored/dependency/virtualenv trees. We
+# acknowledge the folder in the meta layer (so an LLM knows it exists) but never
+# descend into it — its files are not indexed, keeping the catalog focused on
+# the user's own work. Only names that are essentially never real content live
+# here; ambiguous build outputs (build/dist/target) are left to `.quackignore`
+# so quack never silently skips a user's own folder. A `.quackignore` match
+# still wins and hides a dir entirely.
+DEFAULT_OPAQUE_DIRS = {
+    "site-packages", "node_modules", "bower_components",
+    ".venv", "venv", "virtualenv", ".tox", ".eggs",
+}
 
 # quack's own generated/meta files that live alongside content but are not
 # content themselves, so they are never indexed as files.
@@ -100,28 +117,44 @@ def find_root(explicit: str | None = None) -> Path:
     )
 
 
-def _read_text(path: Path) -> tuple[str, bool]:
-    """Return (body, is_binary). Files containing NUL bytes or that fail UTF-8
-    decoding are treated as binary and yield an empty body. Oversize files are
-    truncated to the first TEXT_BODY_MAX_BYTES for the index."""
+def _mtime_iso(path: Path) -> str:
+    """A file's mtime as an ISO-8601 second-precision string ('' if missing)."""
     try:
-        data = path.read_bytes()
+        ts = path.stat().st_mtime
+    except OSError:
+        return ""
+    return datetime.fromtimestamp(ts).isoformat(timespec="seconds")
+
+
+def _read_text(path: Path) -> tuple[str, bool]:
+    """Return (body, is_binary). Files containing NUL bytes are treated as
+    binary and yield an empty body. Only the first TEXT_BODY_MAX_BYTES are read
+    (not the whole file, then truncated) so a huge log/asset doesn't slow the
+    scan. Content that isn't valid UTF-8 but has no NUL bytes is almost
+    certainly text in a legacy encoding (e.g. Windows-1252 smart quotes), so it
+    is decoded leniently rather than dropped or raised."""
+    try:
+        with path.open("rb") as f:
+            chunk = f.read(TEXT_BODY_MAX_BYTES)
     except OSError:
         return "", False
-    if b"\x00" in data[:1024]:
+    if b"\x00" in chunk[:1024]:
         return "", True
     try:
-        return data[:TEXT_BODY_MAX_BYTES].decode("utf-8"), False
+        return chunk.decode("utf-8"), False
     except UnicodeDecodeError:
-        return "", True
+        return chunk.decode("utf-8", errors="replace"), False
 
 
 @dataclass
 class Entry:
-    """A single file and its metadata. ``description``/``tags`` are *effective*:
-    an authored value from ``<folder>/.index.yaml`` overrides the optional
-    Markdown frontmatter seed; ``links`` is derived from ``[[wikilinks]]`` in the
-    body. Authored values are attached by ``Space.load`` (see ``_overlay``)."""
+    """A single file and its metadata. ``description``/``tags`` are *effective*,
+    resolved per field by precedence: authored ``<folder>/.index.yaml`` →
+    Markdown frontmatter → recognition default (see ``recognize``) → empty. As a
+    special case, frontmatter that supplies a *description* suppresses
+    recognition *tags*, so a hand-written note isn't tagged with generic
+    boilerplate. ``links`` is derived from ``[[wikilinks]]`` in the body.
+    Authored values are attached by ``Space.load`` (see ``_overlay``)."""
 
     path: Path
     root: Path
@@ -154,12 +187,25 @@ class Entry:
         rel = self.path.parent.relative_to(self.root).as_posix()
         return "" if rel == "." else rel
 
+    @cached_property
+    def _recognition(self) -> "tuple[str, list[str]] | None":
+        """Zero-cost default ``(description, tags)`` for a well-known file
+        (e.g. ``.gitignore``, ``*.py``), or ``None``. The lowest precedence
+        layer behind authored metadata and frontmatter (see ``recognize``)."""
+        from . import recognize
+
+        return recognize.recognize_file(self.path)
+
     @property
     def description(self) -> str:
         if self._authored_desc:
             return self._authored_desc
         if self._fm is not None:
-            return str(self._fm.get("description", "")).strip()
+            fm = str(self._fm.get("description", "")).strip()
+            if fm:
+                return fm
+        if self._recognition is not None:
+            return self._recognition[0]
         return ""
 
     @property
@@ -169,19 +215,24 @@ class Entry:
         if self._fm is not None:
             raw = self._fm.get("tags", [])
             if isinstance(raw, str):
-                return [t.strip() for t in raw.split(",") if t.strip()]
-            return list(raw or [])
+                parsed = [t.strip() for t in raw.split(",") if t.strip()]
+            else:
+                parsed = list(raw or [])
+            if parsed:
+                return parsed
+            # Frontmatter with a description speaks for the file; don't inject
+            # generic recognition tags on top of an authored-in-file note.
+            if str(self._fm.get("description", "")).strip():
+                return []
+        if self._recognition is not None:
+            return list(self._recognition[1])
         return []
 
     @cached_property
     def modified(self) -> str:
         """The file's mtime as an ISO-8601 second-precision string ('' if the
         file is gone). Refreshed every reindex."""
-        try:
-            ts = self.path.stat().st_mtime
-        except OSError:
-            return ""
-        return datetime.fromtimestamp(ts).isoformat(timespec="seconds")
+        return _mtime_iso(self.path)
 
     @property
     def described_at(self) -> str:
@@ -211,13 +262,26 @@ class Entry:
         return list(seen)
 
 
+def parse_frontmatter(text: str) -> "frontmatter.Post":
+    """Parse frontmatter from already-decoded text, never raising. Malformed
+    YAML frontmatter falls back to treating the whole text as the body (no
+    metadata), so one bad file can't break a reindex."""
+    try:
+        return frontmatter.loads(text)
+    except Exception:
+        return frontmatter.Post(content=text)
+
+
 def load_entry(path: Path, root: Path) -> Entry:
     """Load one file. Markdown is parsed for an optional frontmatter seed; any
-    other file is read as text (empty body if binary/undecodable)."""
-    if path.suffix.lower() == ".md":
-        post = frontmatter.load(path)
-        return Entry(path=path, root=root, body=post.content, _fm=post)
+    other file is read as text. Reads go through ``_read_text`` so a markdown
+    file in a legacy encoding (or an undecodable/binary one) degrades instead of
+    raising — ``frontmatter`` is only handed already-decoded text, and malformed
+    YAML frontmatter is tolerated (see ``parse_frontmatter``)."""
     body, is_binary = _read_text(path)
+    if not is_binary and path.suffix.lower() == ".md":
+        post = parse_frontmatter(body)
+        return Entry(path=path, root=root, body=post.content, _fm=post)
     return Entry(path=path, root=root, body=body, is_binary=is_binary)
 
 
@@ -231,33 +295,160 @@ def _ignored(name: str, rel: str, patterns: set[str]) -> bool:
     return False
 
 
-def iter_files(root: Path, ignores: set[str] | None = None):
-    """Yield every file in the root, skipping ignored dirs/files and quack's own
-    generated artifacts. Not limited to Markdown — this is a meta layer over all
-    files."""
+def _level(base: Path, dirnames: list[str], root: Path, patterns: set[str]):
+    """One os.walk level → (folders_to_record, dirs_to_descend). Shared by
+    :func:`walk` and :func:`count_indexable` so pruning can't diverge: ignored
+    dirs are hidden; opaque dirs are recorded as folders but not descended."""
+    record: list[Path] = []
+    descend: list[str] = []
+    for d in sorted(dirnames):
+        rel = (base / d).relative_to(root).as_posix()
+        if _ignored(d, rel, patterns):
+            continue
+        record.append(base / d)
+        if d not in DEFAULT_OPAQUE_DIRS:
+            descend.append(d)
+    return record, descend
+
+
+def _keep_file(fn: str, rel: str, patterns: set[str]) -> bool:
+    """True if a file should be indexed (not a generated artifact / not ignored)."""
+    return not (fn in GENERATED_FILES or _ignored(fn, rel, patterns))
+
+
+# Below this many files, the thread-pool overhead isn't worth it; load inline.
+_PARALLEL_MIN_FILES = 64
+
+
+def _load_entries(
+    file_paths: list[Path],
+    root: Path,
+    on_file: "Callable[[Entry], None] | None",
+) -> list[Entry]:
+    """Load entries from *file_paths*. Reading file bodies is I/O-bound (the GIL
+    is released during reads), so for many files we load them on a thread pool;
+    ``ThreadPoolExecutor.map`` preserves order, so ``on_file`` still fires in a
+    stable sequence for progress reporting."""
+    if len(file_paths) < _PARALLEL_MIN_FILES:
+        entries: list[Entry] = []
+        for p in file_paths:
+            e = load_entry(p, root)
+            entries.append(e)
+            if on_file is not None:
+                on_file(e)
+        return entries
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    # No max_workers: ThreadPoolExecutor sizes the pool from the machine
+    # (min(32, os.cpu_count() + 4)), so we don't hand-roll resource decisions.
+    entries = []
+    with ThreadPoolExecutor() as pool:
+        for e in pool.map(lambda p: load_entry(p, root), file_paths):
+            entries.append(e)
+            if on_file is not None:
+                on_file(e)
+    return entries
+
+
+def walk(
+    root: Path,
+    ignores: set[str] | None = None,
+    on_file: "Callable[[Entry], None] | None" = None,
+) -> tuple[list[Entry], list[Path]]:
+    """One filesystem pass → (entries, folders).
+
+    ``entries`` is every non-ignored file (loaded), skipping quack's own
+    generated artifacts. ``folders`` is every non-ignored folder under *root*
+    (excluding root itself), including folders that contain only subfolders, so
+    the per-folder meta layer can cover the whole tree. Directory traversal is a
+    single ``os.walk``; the (slower, I/O-bound) file loading is parallelized.
+    *on_file*, if given, is called with each loaded entry (drives progress)."""
     patterns = ignores if ignores is not None else load_ignores(root)
+    file_paths: list[Path] = []
+    folders: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
-        dirnames[:] = [
-            d
-            for d in dirnames
-            if not _ignored(d, (base / d).relative_to(root).as_posix(), patterns)
-        ]
+        record, descend = _level(base, dirnames, root, patterns)
+        folders.extend(record)
+        dirnames[:] = descend
         for fn in filenames:
             rel = (base / fn).relative_to(root).as_posix()
-            if fn in GENERATED_FILES or _ignored(fn, rel, patterns):
-                continue
-            yield load_entry(base / fn, root)
+            if _keep_file(fn, rel, patterns):
+                file_paths.append(base / fn)
+    entries = _load_entries(file_paths, root, on_file)
+    return entries, folders
 
 
-def content_folders(root: Path, ignores: set[str] | None = None) -> list[Path]:
-    """Top-level content folders (excludes ignored + meta dirs)."""
+def count_indexable(root: Path, ignores: set[str] | None = None) -> int:
+    """Count the files :func:`walk` would index, without reading any of them.
+    Cheap (stat/scandir only); used to get a total up front for a progress bar."""
     patterns = ignores if ignores is not None else load_ignores(root)
-    return sorted(
-        p
-        for p in root.iterdir()
-        if p.is_dir() and not _ignored(p.name, p.name, patterns)
-    )
+    n = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        _record, descend = _level(base, dirnames, root, patterns)
+        dirnames[:] = descend
+        for fn in filenames:
+            rel = (base / fn).relative_to(root).as_posix()
+            if _keep_file(fn, rel, patterns):
+                n += 1
+    return n
+
+
+# Per-folder metadata files quack writes/reads; an edit to one of these can
+# change effective metadata without changing any indexed file's mtime.
+_META_MARKERS = (".index.yaml", ".folder.md")
+
+
+def scan_signature(
+    root: Path, ignores: set[str] | None = None
+) -> tuple[dict[str, str], set[str], int]:
+    """Stat-only change signature — no file reads, no parsing.
+
+    Returns ``(files, folders, newest_marker_ns)`` where ``files`` maps each
+    indexable file's rel → its mtime string (same format as ``Entry.modified``),
+    ``folders`` is the set of folder rels, and ``newest_marker_ns`` is the latest
+    ``st_mtime_ns`` among ``.index.yaml``/``.folder.md`` (0 if none) — nanosecond
+    precision so an authored edit made in the same second as a build is still
+    seen. Used for a cheap reindex no-op check before paying for a full
+    :func:`walk`."""
+    patterns = ignores if ignores is not None else load_ignores(root)
+    files: dict[str, str] = {}
+    folders: set[str] = set()
+    newest_marker_ns = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        record, descend = _level(base, dirnames, root, patterns)
+        for d in record:
+            folders.add(d.relative_to(root).as_posix())
+        dirnames[:] = descend
+        for fn in filenames:
+            full = base / fn
+            if fn in _META_MARKERS:
+                try:
+                    ns = full.stat().st_mtime_ns
+                except OSError:
+                    ns = 0
+                if ns > newest_marker_ns:
+                    newest_marker_ns = ns
+                continue
+            rel = full.relative_to(root).as_posix()
+            if _keep_file(fn, rel, patterns):
+                files[rel] = _mtime_iso(full)
+    return files, folders, newest_marker_ns
+
+
+def iter_files(root: Path, ignores: set[str] | None = None):
+    """Yield every non-ignored file in the root. Thin wrapper over :func:`walk`
+    for callers that only need files."""
+    yield from walk(root, ignores)[0]
+
+
+def iter_content_folders(root: Path, ignores: set[str] | None = None):
+    """Yield every non-ignored folder under *root* (excluding root). Thin
+    wrapper over :func:`walk` for callers that only need folders."""
+    yield from walk(root, ignores)[1]
 
 
 @dataclass
@@ -267,13 +458,33 @@ class Space:
 
     root: Path
     entries: list[Entry] = field(default_factory=list)
+    # Every non-ignored folder under root (excluding root), from the same walk
+    # that produced ``entries`` — so consumers never re-traverse the tree.
+    folders: list[Path] = field(default_factory=list)
 
     @classmethod
-    def load(cls, explicit: str | None = None) -> "Space":
+    def load(
+        cls,
+        explicit: str | None = None,
+        progress: "Callable[[int, int, str], None] | None" = None,
+    ) -> "Space":
+        """Load every file with effective metadata. *progress*, if given, is
+        called as ``progress(done, total, message)`` per file during the scan —
+        it triggers a cheap up-front count so a real total is known. Callers
+        that don't need progress (search, embed, doctor) pay no extra walk."""
         root = find_root(explicit)
-        entries = list(iter_files(root))
+        on_file = None
+        if progress is not None:
+            total = count_indexable(root)
+            seen = {"n": 0}
+
+            def on_file(entry: Entry) -> None:
+                seen["n"] += 1
+                progress(seen["n"], total, f"Scanning {entry.rel}")
+
+        entries, folders = walk(root, on_file=on_file)
         _overlay(root, entries)
-        return cls(root=root, entries=entries)
+        return cls(root=root, entries=entries, folders=folders)
 
     @cached_property
     def by_name(self) -> dict[str, Entry]:

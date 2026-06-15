@@ -14,6 +14,28 @@ from quack.indexer import reindex
 from quack.scaffold import scaffold_root
 
 
+def pytest_addoption(parser) -> None:
+    parser.addoption(
+        "--perf-files",
+        action="store",
+        type=int,
+        default=None,
+        help="number of files for perf benchmarks (default 1000 or $QUACK_PERF_FILES)",
+    )
+
+
+@pytest.fixture
+def perf_files(request) -> int:
+    """How many files the perf benchmark generates. From --perf-files, else
+    $QUACK_PERF_FILES, else 1000."""
+    cli = request.config.getoption("--perf-files")
+    if cli is not None:
+        return cli
+    import os
+
+    return int(os.environ.get("QUACK_PERF_FILES", "1000"))
+
+
 def arg_value(args: list[str], flag: str) -> str:
     idx = args.index(flag)
     return args[idx + 1]

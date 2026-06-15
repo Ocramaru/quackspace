@@ -70,6 +70,41 @@ def test_index_store_preserves_authored_fields_and_record_updates_metadata(sampl
     assert beta.tags == ["manual", "beta"]
 
 
+def test_reindex_survives_non_utf8_markdown(sample_space):
+    """A markdown file in a legacy encoding (e.g. Windows-1252 smart quotes)
+    must not crash reindex; it is indexed with leniently decoded text."""
+    root = sample_space
+    # 0x93/0x94 are cp1252 curly quotes, invalid as UTF-8.
+    (root / "projects" / "legacy.md").write_bytes(
+        b"# Legacy\n\nHe said \x93hello\x94 to everyone.\n"
+    )
+    reindex(str(root))  # must not raise
+
+    _, rows = catalog.query(
+        "SELECT rel, body FROM files WHERE rel = 'projects/legacy.md'",
+        explicit_root=str(root),
+    )
+    assert rows and rows[0][0] == "projects/legacy.md"
+    assert "hello" in rows[0][1]  # surrounding text preserved
+
+
+def test_reindex_survives_malformed_frontmatter(sample_space):
+    """A markdown file with broken YAML frontmatter must not crash reindex; the
+    raw text is kept as the body and the file is still indexed."""
+    root = sample_space
+    (root / "projects" / "broken.md").write_text(
+        "---\nthis: : not: valid: yaml\n  [unclosed\n---\n# Broken\n\nreal content\n"
+    )
+    reindex(str(root))  # must not raise
+
+    _, rows = catalog.query(
+        "SELECT rel, body FROM files WHERE rel = 'projects/broken.md'",
+        explicit_root=str(root),
+    )
+    assert rows and rows[0][0] == "projects/broken.md"
+    assert "real content" in rows[0][1]
+
+
 def test_parse_meta_accepts_json_and_falls_back_to_text():
     assert _parse_meta('{"description":"A file","tags":["Py", "CLI"]}') == ("A file", ["py", "cli"])
     assert _parse_meta("just a sentence") == ("just a sentence", [])

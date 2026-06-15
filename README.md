@@ -65,18 +65,23 @@ commands; workspace-local state lives under `.quack/`.
 <your-root>/                ← the Quack Space; quack finds it by the .quack/ marker
 ├── .quack/                 ← workspace-local state/config/index data
 │   ├── config.yaml         your AI assistant and embedding command choices
-│   ├── map.yaml            GENERATED: folder tree + folder descriptions
-│   └── quack.duckdb        GENERATED: catalog (files, tags, links, FTS) — the queryable store
+│   ├── map.yaml            GENERATED: full nested folder tree + descriptions/rollups
+│   └── quack.duckdb        GENERATED: catalog (files, folders, tags, links, FTS) — the queryable store
 ├── .quackignore            optional: extra ignore patterns
 ├── QUACK.md                visible navigation anchor for LLMs
 ├── src/  docs/  notes/ …   ANY files: code, configs, markdown, assets
-│   ├── .index.yaml         EDITABLE: per-file description + tags (links derived)
+│   ├── .index.yaml         EDITABLE: this folder's direct files: + directories:
 │   └── _diagrams.md        GENERATED: this folder's Mermaid link graph
 └── …
 ```
 
-**One rule:** the only thing you edit is each folder's `.index.yaml`
-(description + tags per file; Markdown may also use frontmatter). `quack reindex`
+**One rule:** the only thing you edit is each folder's `.index.yaml`. It
+describes the folder's **direct children**: a `files:` section (description +
+tags per file; Markdown may also use frontmatter) and a `directories:` section
+for its subfolders — so a folder is described by its parent, just like a file.
+Well-known files/folders get a recognition default (authored → frontmatter →
+recognition → blank). There is one `.index.yaml` per folder, including
+subdir-only folders and the root. `quack reindex`
 MERGES it — preserving your text — and regenerates every map, catalog, and
 diagram from the files + `[[wikilinks]]`, so the navigation layer can never
 drift. The root can be named anything; quack locates it by walking up for
@@ -88,9 +93,15 @@ installed package or development checkout, not inside `.quack/`.
 `quack reindex` builds `.quack/quack.duckdb`, a single embedded catalog of all
 metadata: `files` (name, rel, folder, ext, description, tags_csv, n_links,
 n_inbound, is_orphan, is_binary, file_modified, described_at, stale, body),
-`tags(name, tag)`, and `links(src, dst, dst_exists)`, plus a BM25 full-text
-index over name/description/body. (`stale` is true when a file changed after its
-description was written — see `quack generate --stale`.)
+`folders(folder, parent, description, n_files, diagram, described_at)` — the
+direct subfolders of X are `WHERE parent = 'X'` (root is `''`), mirroring the
+`directories:` sections 1:1 — `tags(name, tag)`, and
+`links(src, dst, dst_exists)`, plus a BM25 full-text index over
+name/description/body. (`stale` is true when a file changed after its
+description was written — see `quack generate --stale`.) With `quack embed`,
+files and folders get **separate** vector tables (`embeddings` and
+`folder_embeddings`); `quack search` routes where/which-folder questions to the
+folder space and keeps file vs folder hits distinct.
 
 It is the queryable store and **the graph lives here too**: the `links` table
 is the edge list, and multi-hop traversal is a recursive CTE behind

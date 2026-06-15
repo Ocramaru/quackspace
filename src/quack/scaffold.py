@@ -69,27 +69,33 @@ quack graph path A B           # shortest link path
 
 ## The retrieval ladder (cheapest first — read only what you need)
 
-1. `.quack/map.yaml` — folder-level. Which folder is relevant?
-2. `<folder>/.index.yaml` — file-level. Which 1–3 files match?
+1. `.quack/map.yaml` — global nested tree. Which folder is relevant?
+2. `<folder>/.index.yaml` — its direct `files:` + `directories:`. Which 1–3
+   children match?
 3. The file itself.
 4. `search` / `sql` / `graph_*` — pull only the related slice from the catalog.
 
 ## Ground rules
 
-- Metadata lives in each folder's **editable** `.index.yaml` (`description`,
-  `tags`; `links` derived from `[[wikilinks]]`). Markdown may also carry
-  frontmatter. `quack reindex` merges it all into `.quack/quack.duckdb`.
+- Each folder's **editable** `.index.yaml` describes its direct children — a
+  `files:` section (`description`, `tags`; `links` derived from `[[wikilinks]]`)
+  and a `directories:` section for its subfolders. Well-known files/folders get
+  a recognition default; precedence is authored → frontmatter → recognition →
+  blank. Markdown may also carry frontmatter. `quack reindex` merges it all into
+  `.quack/quack.duckdb` (tables: files, folders, tags, links).
 - Ignore patterns live in `.quackignore` at the root.
 - Full conventions and details: `quack --help`, `quack mcp print`, and the project README.
 """
 
 ROOT_QUACKIGNORE = """# One pattern per line. Names or root-relative paths; globs allowed.
-# Built-ins (.quack, .obsidian, .git, .trash, node_modules) are always ignored.
-# Common build/dependency dirs for code projects (edit to taste):
-.venv
+# Handled automatically (no need to list):
+#   hidden entirely  — .quack, .git, .obsidian, .trash, and caches
+#                      (__pycache__, .mypy_cache, .pytest_cache, .ruff_cache)
+#   mentioned, not indexed — vendored/dependency trees (site-packages,
+#                      node_modules, .venv, venv, .tox, .eggs, bower_components)
+# Build outputs are project-specific; ignore the ones you have (edit to taste):
 dist
 build
-__pycache__
 target
 .next
 *.lock

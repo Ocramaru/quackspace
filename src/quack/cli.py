@@ -97,6 +97,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_diagram = sub.add_parser("diagram", help="regenerate Mermaid link diagrams only")
     _add_root_arg(p_diagram)
 
+    p_clean = sub.add_parser(
+        "clean", help="remove generated artifacts (catalog/map/diagrams)"
+    )
+    _add_root_arg(p_clean)
+    p_clean.add_argument(
+        "--all",
+        dest="purge",
+        action="store_true",
+        help="fully uninstall quack: also remove .index.yaml, QUACK.md, .quack/",
+    )
+    p_clean.add_argument(
+        "--yes", action="store_true", help="skip the confirmation prompt for --all"
+    )
+
     p_doctor = sub.add_parser("doctor", help="health-check the root (files + MCP)")
     _add_root_arg(p_doctor)
     p_doctor.add_argument(
@@ -169,6 +183,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_search.add_argument(
         "--semantic", action="store_true", help="force only vss semantic ranking"
+    )
+    p_search.add_argument(
+        "--folders", action="store_true", help="force only folder-level search"
     )
 
     p_graph = sub.add_parser("graph", help="graph queries over the link structure")
@@ -372,7 +389,8 @@ def _run_generate(args) -> bool:
     if result.skipped:
         print(f"  skipped {len(result.skipped)} file(s) (no usable output)")
     if not args.dry_run and result.updated:
-        reindex(args.root)
+        with swimming("Reindexing") as progress:
+            reindex(args.root, progress=progress.update)
         print("  reindexed")
     return True
 
@@ -444,7 +462,10 @@ def _dispatch(argv: list[str] | None) -> int:
         return 0
 
     if args.command == "reindex":
-        summary = reindex(args.root)
+        from ._duck import swimming
+
+        with swimming("Reindexing") as progress:
+            summary = reindex(args.root, progress=progress.update)
         print(
             f"✓ reindexed {summary['files']} files across "
             f"{summary['folder_indexes']} folder(s)\n"
@@ -459,6 +480,35 @@ def _dispatch(argv: list[str] | None) -> int:
     if args.command == "diagram":
         d = diagram(args.root)
         print(f"✓ wrote {d['folder_diagrams']} folder diagram(s)\n  global: {d['global']}")
+        return 0
+
+    if args.command == "clean":
+        from .clean import clean
+
+        if args.purge and not args.yes:
+            print(
+                "✗ `quack clean --all` fully uninstalls quack and DELETES authored\n"
+                "  .index.yaml descriptions, QUACK.md, and .quack/. This cannot be\n"
+                "  undone. Re-run with --yes to confirm.",
+                file=sys.stderr,
+            )
+            return 1
+        removed = clean(args.root, purge=args.purge)
+        if args.purge:
+            print(
+                f"✓ uninstalled quack: removed {removed['indexes']} index file(s), "
+                f"{removed['diagrams']} diagram(s), and the .quack/ layer"
+            )
+        else:
+            print(
+                f"✓ cleaned derived artifacts: catalog, map, "
+                f"{removed['diagrams']} diagram(s). Run `quack reindex` to rebuild."
+            )
+        if removed.get("extras"):
+            print(
+                f"  (also removed {removed['extras']} stray artifact(s) found by scan "
+                "that the catalog didn't list)"
+            )
         return 0
 
     if args.command == "doctor":
@@ -500,15 +550,17 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command == "describe":
         from . import generate
+        from ._duck import swimming
 
         tags = [t.strip() for t in args.tags.split(",") if t.strip()]
         rel = generate.record(args.root, args.path, args.description, tags)
         if rel is None:
-            print(f"✗ no indexed file matching {args.path!r}", file=sys.stderr)
+            print(f"✗ no indexed file or folder matching {args.path!r}", file=sys.stderr)
             return 1
         print(f"✓ described {rel}")
         if not args.no_reindex:
-            reindex(args.root)
+            with swimming("Reindexing") as progress:
+                reindex(args.root, progress=progress.update)
             print("  reindexed")
         return 0
 
@@ -550,6 +602,16 @@ def _dispatch(argv: list[str] | None) -> int:
             for rel, name, dist in rows:
                 print(f"{rel}  [cosine {dist:.3f}]")
             return 0
+        if args.folders:
+            from .search import format_folder_hits, search_folders
+
+            fhits = search_folders(terms, explicit_root=args.root, limit=args.limit)
+            print(f"# root: {root}  (paths below are relative to it)")
+            print(format_folder_hits(fhits))
+            return 0 if fhits else 1
+
+        from .search import format_folder_hits, route, search_folders
+
         hits = search(
             terms,
             explicit_root=args.root,
@@ -557,7 +619,13 @@ def _dispatch(argv: list[str] | None) -> int:
             expand=not args.no_expand,
         )
         print(format_hits(hits, root=root))
-        return 0 if hits else 1
+        fhits: list = []
+        if route(terms) in ("folders", "both"):
+            fhits = search_folders(terms, explicit_root=args.root, limit=args.limit)
+            if fhits:
+                print("\n# folders")
+                print(format_folder_hits(fhits))
+        return 0 if (hits or fhits) else 1
 
     if args.command == "sql":
         from . import catalog
@@ -576,10 +644,12 @@ def _dispatch(argv: list[str] | None) -> int:
         return _run_agent(args)
 
     if args.command == "embed":
+        from ._duck import swimming
         from .embed import EmbedNotConfigured, build_embeddings
 
         try:
-            result = build_embeddings(args.root)
+            with swimming("Embedding") as progress:
+                result = build_embeddings(args.root, progress=progress.update)
         except EmbedNotConfigured:
             print("No embedding command. Set `embed.command` in .quack/config.yaml,")
             print("then run `quack embed`. It must print a JSON array of floats.")
@@ -588,11 +658,13 @@ def _dispatch(argv: list[str] | None) -> int:
         return 0
 
     if args.command == "init":
+        from ._duck import swimming
         from .scaffold import scaffold_root
 
         root = scaffold_root(args.dir or args.root)
         print(f"✓ scaffolded space at {root}")
-        summary = reindex(str(root))
+        with swimming("Reindexing") as progress:
+            summary = reindex(str(root), progress=progress.update)
         print(f"  reindexed {summary['files']} file(s)")
         print("\nChoose an assistant to auto-write descriptions (optional):\n")
         run_setup(str(root))
