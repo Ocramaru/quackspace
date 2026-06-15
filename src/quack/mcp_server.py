@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -29,14 +30,16 @@ from .search import search as do_search
 
 INSTRUCTIONS = """\
 This is quack, the meta layer over a directory of the user's work (notes, docs,
-code, configs, assets). Use it to find and read files precisely, without loading
-the whole tree into context.
+code, configs, assets). Use it to find and navigate files precisely.
 
 How to navigate (cheapest first):
 1. `map` — folder-level overview. Decides which folder is relevant.
 2. `search` — auto-hybrid (keyword + full-text + semantic if available + graph
    neighbours). This is the default way to find files; you do not pick a mode.
-3. `get_file` — read one file's full content by its path or name.
+3. `file_meta` — description, tags, links, stale flag, and the absolute path for
+   a specific file. quack never reads file content — use the `absolute_path` it
+   returns with your host's own file-reading tool so reads go through your normal
+   permission flow.
 4. `sql` / `graph_path` / `central` / `clusters` — precise structural queries.
 
 Recording what you know:
@@ -45,7 +48,7 @@ Recording what you know:
   files (one call each), then call `reindex()` ONCE so search/sql reflect them.
   Follow that with `embed()` if you want semantic search to reflect the changes.
   This is the intended way to seed quack on a codebase an agent already knows.
-- File CONTENTS are read-only here; only metadata (descriptions, tags) is writable.
+- File CONTENTS are never read or stored by quack tools; only metadata is writable.
 
 Semantic search:
 - `search()` automatically uses semantic (vector) similarity when embeddings
@@ -54,7 +57,8 @@ Semantic search:
   the semantic tier current. It is a no-op if embeddings are not configured.
 
 All paths are RELATIVE to the quack root, which every result reports as `root`.
-To open a file, join root + path. Never assume an absolute path.
+`file_meta` also returns `absolute_path` — pass that directly to your file-reading
+tool without constructing paths yourself.
 
 Call `explain()` for a full architecture and data-flow reference, field semantics,
 and the catalog schema.
@@ -180,7 +184,8 @@ def map() -> dict[str, Any]:
         "next_steps": (
             "Pick a folder, then use sql(\"SELECT rel, name, description FROM files "
             "WHERE folder = '<folder>' ORDER BY name\") to list its files. "
-            "Pass any `rel` value directly to get_file() to read that file."
+            "Pass any `rel` value to file_meta() to get metadata and the absolute path "
+            "for reading with your host file tool."
         ),
     }
 
@@ -218,7 +223,7 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
         )
     else:
         tiers_seen = {t for h in hits for t in h.tiers}
-        tips = ["Call get_file(path) to read any file; use the `path` field directly."]
+        tips = ["Call file_meta(path) for metadata and the absolute path, then read with your host file tool."]
         if "semantic" not in tiers_seen:
             tips.append(
                 "No 'semantic' tier in results — embeddings haven't been built. "
@@ -273,63 +278,78 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
 
 
 @mcp.tool()
-def get_file(path_or_name: str, char_limit: int | None = None) -> dict[str, Any]:
-    """Read one file's full content + metadata. Accepts a root-relative path
-    (src/app/main.py) or a bare file name without extension (main). Content is
-    truncated by default — pass a higher `char_limit` if you need more.
+def file_meta(path_or_name: str) -> dict[str, Any]:
+    """Metadata for one file: description, tags, wikilinks, stale flag, modified
+    time, and the absolute path to pass to your host file-reading tool.
+
+    quack never reads or returns file content — reads must go through your host
+    environment's own tool so they flow through its normal permission checks.
+    Use `absolute_path` directly; do not construct it from `root` + `path`.
+
+    Accepts a root-relative path (preferred — unambiguous; src/app/main.py) or a
+    bare file name (main). Bare names may match multiple files; prefer the `path`
+    field from search() or sql() results to avoid ambiguity.
 
     Field semantics:
     - `stale`: true when the file was modified after its description was last written.
-      Run `quack generate --stale` to refresh stale descriptions.
-    - `truncated`: true when content was cut at `content_limit`; pass
-      char_limit=content_length to read the full file."""
-    from .core import Space
+    - `links`: wikilink targets as {name, exists} — name is a bare stem, not a path."""
+    root = _root()
+    cur = catalog.read_cursor(_root_arg())
+    try:
+        rows = cur.execute(
+            "SELECT rel, name, folder, description, tags_csv, "
+            "is_binary, file_modified, stale "
+            "FROM files WHERE rel = ? OR name = ? LIMIT 2",
+            [path_or_name, path_or_name],
+        ).fetchall()
 
-    space = Space.load(_root_arg())
-    entry = space.by_name.get(path_or_name) or space.by_rel.get(path_or_name)
-    if entry is None:
-        return {
-            "root": _root(),
-            "error": f"No file matching {path_or_name!r}.",
-            "next_steps": "Try search(query) to find the file, or sql(\"SELECT rel FROM files WHERE name LIKE '%<term>%'\") to locate it by name.",
-        }
-    char_limit = _clamp(char_limit, LIMITS.file_chars, MAX_FILE_CHAR_LIMIT)
-    content, truncated = _truncate(entry.body, char_limit)
-    result: dict[str, Any] = {
-        "root": _root(),
-        "path": entry.rel,
-        "name": entry.name,
-        "description": entry.description,
-        "tags": entry.tags,
-        "links": entry.links,
-        "is_binary": entry.is_binary,
-        "modified": entry.modified,
-        "stale": entry.stale,
-        "content": content,
-        "content_length": len(entry.body),
-        "content_limit": char_limit,
-        "truncated": truncated,
+        if not rows:
+            return {
+                "root": root,
+                "error": f"No file matching {path_or_name!r}.",
+                "next_steps": (
+                    "Try search(query) or "
+                    "sql(\"SELECT rel, name FROM files WHERE name LIKE '%<term>%'\") "
+                    "to locate the file, then call file_meta(path_or_name=rel)."
+                ),
+            }
+
+        if len(rows) > 1:
+            return {
+                "root": root,
+                "error": f"Ambiguous name {path_or_name!r} — multiple files match.",
+                "candidates": [{"path": r[0], "name": r[1], "folder": r[2]} for r in rows],
+                "next_steps": "Call file_meta(path_or_name=<path>) with one of the candidate paths.",
+            }
+
+        rel, name, folder, description, tags_csv, is_binary, modified, stale = rows[0]
+        link_rows = cur.execute(
+            "SELECT dst, dst_exists FROM links WHERE src = ?", [name]
+        ).fetchall()
+    finally:
+        cur.close()
+
+    tags = [t for t in (tags_csv or "").split(",") if t]
+    links = [{"name": dst, "exists": bool(exists)} for dst, exists in link_rows]
+    absolute_path = str(Path(root) / rel)
+
+    return {
+        "root": root,
+        "path": rel,
+        "absolute_path": absolute_path,
+        "name": name,
+        "folder": folder,
+        "description": description or "",
+        "tags": tags,
+        "links": links,
+        "is_binary": bool(is_binary),
+        "modified": str(modified) if modified else None,
+        "stale": bool(stale),
+        "next_steps": (
+            f"Read content with your host file-reading tool at: {absolute_path!r}. "
+            "After reading, call describe(path, description, tags) to annotate what you learned."
+        ),
     }
-    if truncated:
-        next_limit = min(len(entry.body), MAX_FILE_CHAR_LIMIT)
-        if next_limit < len(entry.body):
-            result["next_steps"] = (
-                f"Content truncated at {char_limit} of {len(entry.body)} chars. "
-                f"File exceeds the {MAX_FILE_CHAR_LIMIT}-char maximum; "
-                f"call get_file('{entry.rel}', char_limit={MAX_FILE_CHAR_LIMIT}) to read as much as possible, "
-                "or use sql() to query specific fields."
-            )
-        else:
-            result["next_steps"] = (
-                f"Content truncated at {char_limit} of {len(entry.body)} chars. "
-                f"Call get_file('{entry.rel}', char_limit={next_limit}) to read the full file."
-            )
-    else:
-        result["next_steps"] = (
-            "Full content returned. Call describe(path, description, tags) to record "
-            "what you learned about this file, then reindex() to make it searchable."
-        )
-    return result
 
 
 @mcp.tool()
@@ -389,8 +409,8 @@ def graph_path(src: str, dst: str) -> dict[str, Any]:
         "connected": path is not None,
         "path": path,
         "next_steps": (
-            "Nodes in `path` are file names. Call get_file(path_or_name=name) on "
-            "any node to read it, or search(name) to locate it if name is ambiguous."
+            "Nodes in `path` are file names. Call file_meta(path_or_name=name) for "
+            "metadata and the absolute path, then read with your host file tool."
         ) if path else (
             "No wikilink connection found. Try central() to find hub files, or "
             "clusters() to see whether src and dst belong to different topic islands."
@@ -411,8 +431,8 @@ def central(limit: int | None = None) -> dict[str, Any]:
         "max_limit": MAX_CENTRAL_LIMIT,
         "hubs": [{"name": n, "path": r, "degree": d} for n, r, d in rows],
         "next_steps": (
-            "Call get_file(path) on any hub to read it, or graph_path(src, dst) "
-            "to trace how two hub files connect."
+            "Call file_meta(path) on any hub for metadata and its absolute path, "
+            "then read with your host file tool. Or call graph_path(src, dst) to trace connections."
         ),
     }
 
@@ -426,8 +446,9 @@ def clusters() -> dict[str, Any]:
         "root": _root(),
         "clusters": graph_mod.components(explicit_root=_root_arg()),
         "next_steps": (
-            "Each cluster is a list of file names. Call get_file(path_or_name=name) "
-            "to read any file, or central() to find the most-connected hub within a cluster."
+            "Each cluster is a list of file names. Call file_meta(path_or_name=name) "
+            "for metadata and the absolute path to read with your host tool, "
+            "or central() to find the most-connected hub within a cluster."
         ),
     }
 
@@ -501,7 +522,7 @@ def explain() -> dict[str, Any]:
         "data_flow": (
             "describe() writes into .index.yaml (the editable store). "
             "reindex() rebuilds .quack/quack.duckdb from those files. "
-            "search/sql/map/get_file all read from the catalog. "
+            "search/sql/map/file_meta all read from the catalog — never from the filesystem. "
             "The catalog is derived and never authoritative — delete it and "
             "reindex() rebuilds it from scratch."
         ),
@@ -531,7 +552,7 @@ def explain() -> dict[str, Any]:
                 "non-empty when the hit was expanded from the link graph as a neighbour "
                 "of a direct match, not matched directly itself"
             ),
-            "stale": "true when the file changed after its description was last written — refresh with `quack generate --stale`",
+            "stale": "true when the file changed after its description was last written",
             "folders": (
                 "populated when the query asks about location/which-folder; "
                 "kept separate from file hits, never blended"
