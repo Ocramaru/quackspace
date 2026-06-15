@@ -48,6 +48,28 @@ def db_path(space: Space) -> Path:
     return space.root / ".quack" / DB_NAME
 
 
+def _insert_rows(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple]) -> None:
+    """Bulk-insert ``rows`` (list of column-ordered tuples) into *table*.
+
+    Uses a columnar Arrow insert — DuckDB ingests an Arrow table zero-copy, far
+    faster than row-by-row ``executemany`` (which binds every value). Falls back
+    to ``executemany`` if PyArrow isn't importable. Caller wraps in a txn."""
+    if not rows:
+        return
+    try:
+        import pyarrow as pa
+    except ImportError:
+        placeholders = "(" + ",".join("?" * len(rows[0])) + ")"
+        con.executemany(f"INSERT INTO {table} VALUES {placeholders}", rows)
+        return
+    arrow_tbl = pa.table({f"c{i}": pa.array(col) for i, col in enumerate(zip(*rows))})
+    con.register("_bulk_arrow", arrow_tbl)
+    try:
+        con.execute(f"INSERT INTO {table} SELECT * FROM _bulk_arrow")
+    finally:
+        con.unregister("_bulk_arrow")
+
+
 def build(space: Space, folder_infos: "dict | None" = None) -> dict:
     """Rebuild the catalog from scratch over the loaded space. Returns a
     summary. The space already carries effective metadata (authored .index.yaml
@@ -101,14 +123,10 @@ def build(space: Space, folder_infos: "dict | None" = None) -> dict:
         # One transaction for all inserts: DuckDB auto-commits per statement, so
         # row-by-row executemany without this commits N times and is ~8x slower.
         con.execute("BEGIN TRANSACTION")
-        if file_rows:
-            con.executemany("INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", file_rows)
-        if folder_rows:
-            con.executemany("INSERT INTO folders VALUES (?,?,?,?,?,?)", folder_rows)
-        if tag_rows:
-            con.executemany("INSERT INTO tags VALUES (?,?)", tag_rows)
-        if link_rows:
-            con.executemany("INSERT INTO links VALUES (?,?,?)", link_rows)
+        _insert_rows(con, "files", file_rows)
+        _insert_rows(con, "folders", folder_rows)
+        _insert_rows(con, "tags", tag_rows)
+        _insert_rows(con, "links", link_rows)
         con.execute("COMMIT")
         _build_fts(con)
         n_files = con.execute("SELECT count(*) FROM files").fetchone()[0]
@@ -166,8 +184,7 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
         # is cheap and keeps the code simple.
         con.execute("DELETE FROM tags;")
         tag_rows = [(e.name, tag) for e in space.entries for tag in e.tags]
-        if tag_rows:
-            con.executemany("INSERT INTO tags VALUES (?,?)", tag_rows)
+        _insert_rows(con, "tags", tag_rows)
 
         con.execute("DELETE FROM folders;")
         folder_rows = [
@@ -175,8 +192,7 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
             for i in folder_infos.values()
             if not i.is_root
         ]
-        if folder_rows:
-            con.executemany("INSERT INTO folders VALUES (?,?,?,?,?,?)", folder_rows)
+        _insert_rows(con, "folders", folder_rows)
         con.execute("COMMIT")
 
         n_files = con.execute("SELECT count(*) FROM files").fetchone()[0]
