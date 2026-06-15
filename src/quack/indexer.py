@@ -386,25 +386,32 @@ def reindex(
         ensure_gitignore(root)
         return noop
 
-    # Space.load drives the per-file scan progress (a real [done/total] bar);
-    # the cheap phases after it just update the message at a full bar.
+    # Space.load drives the per-file scan progress. Later phases usually don't
+    # have fine-grained counts, so they get their own small start/done bars.
     space = Space.load(explicit_root, progress=progress)
-    total = max(len(space.entries), 1)
 
-    def _tick(message: str) -> None:
+    def _phase_start(message: str) -> None:
         if progress is not None:
-            progress(total, total, message)
+            progress(0, 1, message)
+
+    def _phase_done(message: str) -> None:
+        if progress is not None:
+            progress(1, 1, message)
 
     ensure_gitignore(space.root)
 
     # Resolve folder metadata once and feed it to every consumer (dirty
     # detection, indexes, map, catalog) so they can't drift.
+    _phase_start("Resolving folder metadata")
     folder_infos = folders.resolve_folders(space)
+    _phase_done("Resolved folder metadata")
+    _phase_start("Checking catalog changes")
     d = _compute_dirty(space, folder_infos)
+    _phase_done("Checked catalog changes")
 
     if d.nothing_to_do and not catalog_mode_changed:
         # Nothing changed — return without touching any files.
-        _tick("Already up to date")
+        _phase_done("Already up to date")
         return {
             "space": str(space.root),
             "files": len(space.entries),
@@ -416,20 +423,22 @@ def reindex(
 
     # When only some folders are dirty, also refresh their ancestors, whose
     # directory rollups changed.
-    _tick("Writing folder indexes")
+    _phase_start("Writing folder indexes")
     dirty = None if d.full_rebuild else _expand_dirty(d.folders, space.root)
     indexes = write_folder_indexes(space, folder_infos, dirty_folders=dirty)
-    _tick("Writing map")
+    _phase_done("Wrote folder indexes")
+    _phase_start("Writing map")
     map_path = write_map(space, folder_infos)
+    _phase_done("Wrote map")
 
-    _tick("Building catalog")
+    _phase_start("Building catalog")
     if d.full_rebuild or d.need_full or catalog_mode_changed:
         cat = catalog.build(space, folder_infos, store_body=store_body)
         mode = "full"
     else:
         cat = catalog.update_light(space, folder_infos)
         mode = "light"
-    _tick("Done")
+    _phase_done("Built catalog")
 
     return {
         "space": str(space.root),

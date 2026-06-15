@@ -529,8 +529,8 @@ def _progress_label(done: int | None, total: int | None) -> str:
     if done is None:
         return ""
     if total is None:
-        return f"[{done}]"
-    return f"[{done}/{total}]"
+        return f"[{done:,}]"
+    return f"[{done:,}/{total:,}]"
 
 
 def _progress_bar(done: int | None, total: int | None, width: int) -> str | None:
@@ -541,7 +541,7 @@ def _progress_bar(done: int | None, total: int | None, width: int) -> str | None
     filled = round(bar_width * done / total)
     bar = "━" * filled + "─" * (bar_width - filled)
     percent = round(100 * done / total)
-    label = f"{done}/{total} {percent}%"
+    label = f"{done:,}/{total:,} {percent}%"
     left = max(0, (width - bar_width - len(label) - 3) // 2)
     return (
         f"{' ' * left}[bold cyan]{bar[:filled]}[/]"

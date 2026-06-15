@@ -133,9 +133,9 @@ def test_frame_layout_stays_stable_across_animation_frames():
 
 
 def test_frame_renders_progress_bar_when_total_is_known():
-    frame = _duck._frame(0, "Reindexing", done=4, total=8, width=80)
+    frame = _duck._frame(0, "Reindexing", done=335965, total=486096, width=80)
 
-    assert "4/8 50%" in frame
+    assert "335,965/486,096 69%" in frame
     assert "━━━━" in frame
 
 

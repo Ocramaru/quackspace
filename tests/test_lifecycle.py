@@ -92,6 +92,26 @@ def test_reindex_fast_noop_reports_file_progress(sample_space):
     assert calls[-1][2].startswith("Checking ")
 
 
+def test_reindex_reports_post_scan_phases(sample_space):
+    root = sample_space
+    calls: list[tuple[int, int, str]] = []
+
+    reindex(
+        str(root),
+        progress=lambda done, total, message: calls.append((done, total, message)),
+    )
+
+    assert (0, 1, "Counting files") in calls
+    assert (1, 1, "Counted files") in calls
+    assert (0, 1, "Loading file contents") in calls
+    assert (0, 1, "Applying metadata") in calls
+    assert (1, 1, "Applied metadata") in calls
+    assert (0, 1, "Resolving folder metadata") in calls
+    assert (1, 1, "Resolved folder metadata") in calls
+    assert (0, 1, "Checking catalog changes") in calls
+    assert (1, 1, "Checked catalog changes") in calls
+
+
 def test_index_store_preserves_authored_fields_and_record_updates_metadata(sample_space):
     root = sample_space
     reindex(str(root))

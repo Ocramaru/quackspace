@@ -486,15 +486,23 @@ class Space:
         root = find_root(explicit)
         on_file = None
         if progress is not None:
+            progress(0, 1, "Counting files")
             total = count_indexable(root)
+            progress(1, 1, "Counted files")
             seen = {"n": 0}
 
             def on_file(entry: Entry) -> None:
                 seen["n"] += 1
                 progress(seen["n"], total, f"Scanning {entry.rel}")
 
+        if progress is not None:
+            progress(0, 1, "Loading file contents")
         entries, folders = walk(root, on_file=on_file)
+        if progress is not None:
+            progress(0, 1, "Applying metadata")
         _overlay(root, entries)
+        if progress is not None:
+            progress(1, 1, "Applied metadata")
         return cls(root=root, entries=entries, folders=folders)
 
     @cached_property
