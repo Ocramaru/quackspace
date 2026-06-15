@@ -466,19 +466,28 @@ def _dispatch(argv: list[str] | None) -> int:
 
         with swimming("Reindexing") as progress:
             summary = reindex(args.root, progress=progress.update)
+            if not args.no_diagrams and summary["folder_indexes"]:
+                progress.update(message="Generating diagrams")
+                d = diagram(args.root, progress=progress.update)
+            else:
+                d = None
         print(
             f"✓ reindexed {summary['files']} files across "
             f"{summary['folder_indexes']} folder(s)\n"
             f"  map:     {summary['map']}\n"
             f"  catalog: {summary['db']}"
         )
-        if not args.no_diagrams:
-            d = diagram(args.root)
+        if d is not None:
             print(f"  diagrams: {d['folder_diagrams']} folder(s) + {d['global']}")
+        elif not args.no_diagrams:
+            print("  diagrams: skipped (no folder indexes changed)")
         return 0
 
     if args.command == "diagram":
-        d = diagram(args.root)
+        from ._duck import swimming
+
+        with swimming("Generating diagrams") as progress:
+            d = diagram(args.root, progress=progress.update)
         print(f"✓ wrote {d['folder_diagrams']} folder diagram(s)\n  global: {d['global']}")
         return 0
 

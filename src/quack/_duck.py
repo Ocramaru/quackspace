@@ -525,6 +525,30 @@ def _truncate_text(text: str, max_width: int) -> str:
     return f"{text[: max_width - 3]}..."
 
 
+def _progress_label(done: int | None, total: int | None) -> str:
+    if done is None:
+        return ""
+    if total is None:
+        return f"[{done}]"
+    return f"[{done}/{total}]"
+
+
+def _progress_bar(done: int | None, total: int | None, width: int) -> str | None:
+    if done is None or total is None or total <= 0:
+        return None
+    bar_width = max(10, min(36, width - 14))
+    done = max(0, min(done, total))
+    filled = round(bar_width * done / total)
+    bar = "━" * filled + "─" * (bar_width - filled)
+    percent = round(100 * done / total)
+    label = f"{done}/{total} {percent}%"
+    left = max(0, (width - bar_width - len(label) - 3) // 2)
+    return (
+        f"{' ' * left}[bold cyan]{bar[:filled]}[/]"
+        f"[dim cyan]{bar[filled:]}[/] [dim]{label}[/]"
+    )
+
+
 def _header_rows(width: int, status: str) -> tuple[str, str, str]:
     rows = [_blank_cells(width) for _ in range(3)]
     box_width = min(_STATUS_BOX_MAX_WIDTH, max(_STATUS_BOX_MIN_WIDTH, width // 2))
@@ -588,17 +612,14 @@ def _frame(
     crest, surface = _wave_rows(i, width)
     _, top_surface = _wave_rows(i + 7, width)
     dots = "." * ((i // 2) % 4)
-    progress = ""
-    if done is not None:
-        progress = f" [{done}"
-        if total is not None:
-            progress += f"/{total}"
-        progress += "]"
-    status = f"{_message(i, message)}{progress}{dots}"
+    status = f"{_message(i, message)}{dots}"
     header_rows = _header_rows(width, status)
     duck_rows = _duck_scene_rows(i, width, baby_count, baby_specs)
+    progress_bar = _progress_bar(done, total, width)
+    progress_block = f"{progress_bar}\n" if progress_bar is not None else ""
     return (
         f"{chr(10).join(header_rows)}\n"
+        f"{progress_block}"
         f"[dim magenta]{top_surface}[/]\n"
         f"{chr(10).join(duck_rows)}\n"
         f"[dim cyan]{crest}[/]\n"
@@ -714,12 +735,26 @@ def swimming(
 _PADDLE_SPINNER = ("|", "/", "-", "\\")
 
 
-def _paddling_frame(frame: int, message: str) -> str:
+def _paddling_frame(
+    frame: int,
+    message: str,
+    *,
+    done: int | None = None,
+    total: int | None = None,
+    width: int = 80,
+) -> str:
     spinner = _PADDLE_SPINNER[frame % len(_PADDLE_SPINNER)]
     tail = _TAILS[(frame // 2) % len(_TAILS)]
+    label = _progress_label(done, total)
+    prefix_plain_width = len("<(o )___~ ") + len(spinner) + 1
+    if label:
+        prefix_plain_width += len(label) + 1
+    max_message = max(1, width - prefix_plain_width - 1)
+    message = _truncate_text(message, max_message)
+    label_part = f" [bold gold1]{label}[/]" if label else ""
     return (
         f"[gold1]<(o )___[/][gold1]{tail}[/] "
-        f"[bold cyan]{spinner}[/] [dim]{message}[/]"
+        f"[bold cyan]{spinner}[/]{label_part} [dim]{message}[/]"
     )
 
 
@@ -749,6 +784,7 @@ class PaddlingProgress:
             return self
 
         console = Console(stderr=True)
+        self._console = console
         self._render_markup = console.render_str
         self._live = Live(
             console=console,
@@ -785,20 +821,23 @@ class PaddlingProgress:
         assert self._live is not None
         delay = 1 / max(self.refresh_per_second, 1)
         last_frame: str | None = None
+        last_width: int | None = None
         for i in itertools.count():
             if self._stop.is_set():
                 return
+            width = getattr(self._console, "width", None) or 80
             with self._lock:
-                progress = ""
-                if self.done is not None:
-                    progress = f" [{self.done}"
-                    if self.total is not None:
-                        progress += f"/{self.total}"
-                    progress += "]"
-                frame = _paddling_frame(i, f"{self.message}{progress}")
-            if frame != last_frame:
+                frame = _paddling_frame(
+                    i,
+                    self.message,
+                    done=self.done,
+                    total=self.total,
+                    width=width,
+                )
+            if frame != last_frame or width != last_width:
                 self._live.update(self._render_markup(frame))
                 last_frame = frame
+                last_width = width
             time.sleep(delay)
 
 

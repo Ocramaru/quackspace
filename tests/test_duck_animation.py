@@ -58,6 +58,19 @@ def test_paddling_noops_when_disabled():
     assert progress.refresh_per_second == 10
 
 
+def test_paddling_frame_preserves_count_when_message_is_truncated():
+    frame = _duck._paddling_frame(
+        1,
+        "Searching embeddings and loading a very long explanation",
+        done=4,
+        total=6,
+        width=34,
+    )
+
+    assert "[4/6]" in frame
+    assert "..." in frame
+
+
 def test_family_state_adds_ducks_from_right_after_interval():
     family = _duck._FamilyState.create(
         refresh_per_second=1,
@@ -117,6 +130,13 @@ def test_frame_layout_stays_stable_across_animation_frames():
     assert len(_duck._frame(0, "Working").splitlines()) == len(
         _duck._frame(25, "Working").splitlines()
     )
+
+
+def test_frame_renders_progress_bar_when_total_is_known():
+    frame = _duck._frame(0, "Reindexing", done=4, total=8, width=80)
+
+    assert "4/8 50%" in frame
+    assert "━━━━" in frame
 
 
 def test_fill_descriptions_reports_progress(sample_space, monkeypatch):

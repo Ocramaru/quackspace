@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
+from typing import Callable
 
 from .core import Space
 
@@ -117,9 +118,17 @@ def write_global_diagram(space: Space) -> Path:
     return out
 
 
-def diagram(explicit_root: str | None = None) -> dict:
-    space = Space.load(explicit_root)
+def diagram(
+    explicit_root: str | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> dict:
+    space = Space.load(explicit_root, progress=progress)
+    total = max(len(space.entries), 1)
+    if progress is not None:
+        progress(total, total, "Writing folder diagrams")
     folders = write_folder_diagrams(space)
+    if progress is not None:
+        progress(total, total, "Writing global diagram")
     global_path = write_global_diagram(space)
     return {
         "folder_diagrams": len(folders),
