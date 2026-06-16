@@ -63,7 +63,12 @@ def _found_on_disk(root: Path) -> set[Path]:
     return found
 
 
-def clean(explicit_root: str | None = None, purge: bool = False) -> dict:
+def clean(
+    explicit_root: str | None = None,
+    purge: bool = False,
+    dry_run: bool = False,
+    targets: set[str] | None = None,
+) -> dict:
     """Remove quack's generated artifacts. Returns counts of what was removed,
     including ``extras`` (artifacts found by the disk scan that the catalog map
     didn't list). With *purge*, fully uninstalls the quack layer (destructive —
@@ -71,6 +76,9 @@ def clean(explicit_root: str | None = None, purge: bool = False) -> dict:
     root = find_root(explicit_root)
     quack_dir = root / MARKER_DIR
     removed = {"catalog": 0, "map": 0, "diagrams": 0, "indexes": 0, "other": 0}
+    selected = targets or {"catalog", "map", "diagrams"}
+    if purge:
+        selected = {"catalog", "map", "diagrams", "indexes", "other"}
 
     # Fast map from the catalog + the catch-all scan; union, note the extras.
     known = _known_from_catalog(root)
@@ -80,44 +88,54 @@ def clean(explicit_root: str | None = None, purge: bool = False) -> dict:
 
     # Derived state files inside .quack/ (config is kept on a derived clean).
     for name, key in ((DB_NAME, "catalog"), ("map.yaml", "map"), ("diagram.md", "diagrams")):
+        if key not in selected:
+            continue
         p = quack_dir / name
         if p.exists():
-            p.unlink()
+            if not dry_run:
+                p.unlink()
             removed[key] += 1
 
     for p in artifacts:
-        if p.name == DIAGRAM_NAME and p.exists():
-            p.unlink()
+        if p.name == DIAGRAM_NAME and "diagrams" in selected and p.exists():
+            if not dry_run:
+                p.unlink()
             removed["diagrams"] += 1
-        elif p.name == INDEX_NAME and purge and p.exists():
-            p.unlink()
+        elif p.name == INDEX_NAME and "indexes" in selected and p.exists():
+            if not dry_run:
+                p.unlink()
             removed["indexes"] += 1
 
-    if purge:
+    if "other" in selected:
         from .gitignore import remove_gitignore
         from .kiro import hook_definitions
 
         for name in ("QUACK.md", ".quackignore", ".mcp.json"):
             p = root / name
             if p.exists():
-                p.unlink()
+                if not dry_run:
+                    p.unlink()
                 removed["other"] += 1
         # Remove only quack's own Kiro hooks, never the user's .kiro/ config.
         hooks_dir = root / ".kiro" / "hooks"
         for slug in hook_definitions():
             hook = hooks_dir / f"{slug}.kiro.hook"
             if hook.exists():
-                hook.unlink()
+                if not dry_run:
+                    hook.unlink()
                 removed["other"] += 1
-        if remove_gitignore(root):
+        if remove_gitignore(root, dry_run=dry_run):
             removed["other"] += 1
         if quack_dir.exists():
-            shutil.rmtree(quack_dir)
+            if not dry_run:
+                shutil.rmtree(quack_dir)
             removed["other"] += 1
 
     removed["extras"] = sum(
         1
         for p in extras
-        if p.name == DIAGRAM_NAME or (purge and p.name == INDEX_NAME)
+        if (p.name == DIAGRAM_NAME and "diagrams" in selected)
+        or (p.name == INDEX_NAME and "indexes" in selected)
     )
+    removed["targets"] = sorted(selected)
     return removed

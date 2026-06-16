@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import builtins
 import json
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from conftest import arg_value
 from quack.cli import main
@@ -59,6 +62,147 @@ def test_where_prints_workspace_state_package_and_command(tmp_path, capsys):
     assert "package:" in out
     assert "command:" in out
     assert f"guide:    {root.resolve() / 'QUACK.md'}" in out
+
+
+def test_init_prints_clean_reindex_summary(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "space"
+    monkeypatch.setenv("QUACK_NO_ANIM", "1")
+    monkeypatch.setattr("quack.cli.run_setup", lambda _root: None)
+    monkeypatch.setattr("quack.cli.reindex", lambda _root, progress=None: {"files": 486099})
+
+    assert main(["init", str(root)]) == 0
+
+    out = capsys.readouterr().out
+    assert "✓ scaffolded space at" in out
+    assert "✓ reindexed 486,099 file(s)" in out
+    assert "  reindexed 486099 file(s)" not in out
+
+
+def test_init_can_skip_first_reindex(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "space"
+    monkeypatch.setenv("QUACK_NO_ANIM", "1")
+    monkeypatch.setattr("quack.cli.run_setup", lambda _root: None)
+
+    def fail_reindex(_root, progress=None):
+        raise AssertionError("reindex should not run")
+
+    monkeypatch.setattr("quack.cli.reindex", fail_reindex)
+
+    assert main(["init", str(root), "--no-reindex"]) == 0
+
+    out = capsys.readouterr().out
+    assert "✓ scaffolded space at" in out
+    assert "reindex: skipped (--no-reindex)" in out
+
+
+def test_init_dry_run_lists_writes_without_scaffolding(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "space"
+    monkeypatch.setenv("QUACK_NO_ANIM", "1")
+
+    assert main(["init", str(root), "--dry-run"]) == 0
+
+    out = capsys.readouterr().out
+    assert "quack init preview" in out
+    assert "paths:" in out
+    assert str(root.resolve() / ".quack") in out
+    assert str(root.resolve() / "QUACK.md") in out
+    assert "gitignore: repo .gitignore files checked during init" in out
+    assert "reindex: runs during init" in out
+    assert not root.exists()
+
+
+def test_init_dry_run_does_not_scan_gitignore_repos(tmp_path, monkeypatch):
+    root = tmp_path / "space"
+    monkeypatch.setattr(
+        "quack.scaffold.preview_gitignore",
+        lambda _root: pytest.fail("dry-run should stay cheap"),
+        raising=False,
+    )
+
+    assert main(["init", str(root), "--dry-run"]) == 0
+
+
+def test_init_no_gitignore_skips_repo_gitignore(tmp_path, capsys, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    monkeypatch.setenv("QUACK_NO_ANIM", "1")
+    monkeypatch.setattr("quack.cli.run_setup", lambda _root: None)
+
+    assert main(["init", str(repo), "--no-gitignore", "--no-reindex"]) == 0
+
+    out = capsys.readouterr().out
+    assert "gitignore: skipped (--no-gitignore)" in out
+    assert not (repo / ".gitignore").exists()
+    assert not (repo / ".quack" / ".gitignore").exists()
+    config = yaml.safe_load((repo / ".quack" / "config.yaml").read_text())
+    assert config["gitignore"] is False
+
+
+def test_init_interactive_choices_update_config_before_writes(tmp_path, capsys, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    answers = iter(["n", "n"])
+    monkeypatch.setenv("QUACK_NO_ANIM", "1")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(builtins, "input", lambda _prompt: next(answers))
+    monkeypatch.setattr("quack.cli.run_setup", lambda _root: None)
+    monkeypatch.setattr(
+        "quack.cli.reindex",
+        lambda _root, progress=None: {"files": 0, "folder_indexes": 0},
+    )
+
+    assert main(["init", str(repo)]) == 0
+
+    out = capsys.readouterr().out
+    assert "diagrams: turned off in config" in out
+    assert not (repo / ".gitignore").exists()
+    assert not (repo / ".quack" / ".gitignore").exists()
+    config = yaml.safe_load((repo / ".quack" / "config.yaml").read_text())
+    assert config["gitignore"] is False
+    assert config["index"]["diagrams"] is False
+
+
+def test_init_preserves_existing_config_without_prompting(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "space"
+    (root / ".quack").mkdir(parents=True)
+    (root / ".quack" / "config.yaml").write_text(
+        yaml.safe_dump({"index": {"store_body": False, "diagrams": False}})
+    )
+    monkeypatch.setenv("QUACK_NO_ANIM", "1")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(builtins, "input", lambda _prompt: pytest.fail("should not prompt"))
+    monkeypatch.setattr("quack.cli.run_setup", lambda _root: None)
+
+    assert main(["init", str(root), "--no-reindex"]) == 0
+
+    out = capsys.readouterr().out
+    assert "config: preserved existing" in out
+    config = yaml.safe_load((root / ".quack" / "config.yaml").read_text())
+    assert config["index"] == {"store_body": False, "diagrams": False}
+
+
+def test_reindex_honors_configured_diagram_skip(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "space"
+    (root / ".quack").mkdir(parents=True)
+    (root / ".quack" / "config.yaml").write_text(
+        yaml.safe_dump({"index": {"diagrams": False}})
+    )
+    monkeypatch.setenv("QUACK_NO_ANIM", "1")
+    monkeypatch.setattr(
+        "quack.cli.reindex",
+        lambda _root, progress=None: {
+            "files": 1,
+            "folder_indexes": 1,
+            "map": str(root / ".quack" / "map.yaml"),
+            "db": str(root / ".quack" / "quack.duckdb"),
+        },
+    )
+    monkeypatch.setattr("quack.cli.diagram", lambda *args, **kwargs: pytest.fail("should not diagram"))
+
+    assert main(["reindex", "--root", str(root)]) == 0
+
+    out = capsys.readouterr().out
+    assert "diagrams: skipped (index.diagrams: false)" in out
 
 
 def test_mcp_launch_uses_source_checkout_when_command_not_installed(tmp_path, monkeypatch):
@@ -132,18 +276,18 @@ def test_write_config_preserves_existing_defaults(tmp_path):
         "sql_row_limit": 5,
         "central_limit": 6,
     }
-    assert data["index"] == {"store_body": False}
+    assert data["index"] == {"store_body": False, "diagrams": True}
 
 
 def test_config_loads_index_body_storage(tmp_path):
-    import yaml
     from quack.config import Config
 
     root = tmp_path / "space"
     (root / ".quack").mkdir(parents=True)
     config = root / ".quack" / "config.yaml"
-    config.write_text(yaml.safe_dump({"index": {"store_body": "false"}}))
+    config.write_text(yaml.safe_dump({"index": {"store_body": "false", "diagrams": "false"}}))
 
     loaded = Config.load(str(root))
 
     assert loaded.index.store_body is False
+    assert loaded.index.diagrams is False

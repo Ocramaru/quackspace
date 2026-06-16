@@ -183,15 +183,30 @@ def write_index(
     described_at``; ``dirs`` (immediate subfolders) carry ``name, description,
     tags, n_files, diagram, types, described_at``. The ``directories:`` section
     is written first (and only when there are subfolders)."""
+    path = index_path(folder)
+    path.write_text(render_index(entries, dirs))
+    return path
+
+
+def write_index_if_changed(
+    folder: Path, entries: list[dict], dirs: list[dict] | None = None
+) -> Path | None:
+    """Write ``<folder>/.index.yaml`` only when the rendered YAML changes."""
+    path = index_path(folder)
+    text = render_index(entries, dirs)
+    if path.exists() and path.read_text() == text:
+        return None
+    path.write_text(text)
+    return path
+
+
+def render_index(entries: list[dict], dirs: list[dict] | None = None) -> str:
+    """Render the complete ``.index.yaml`` text for a folder."""
     doc: dict = {}
     if dirs:
         doc[DIRS_KEY] = _dir_body(dirs)
     doc[FILES_KEY] = _file_body(entries)
-    path = index_path(folder)
-    path.write_text(
-        HEADER + fast_dump(doc)
-    )
-    return path
+    return HEADER + fast_dump(doc)
 
 
 def set_meta(

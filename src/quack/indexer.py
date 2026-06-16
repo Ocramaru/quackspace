@@ -43,6 +43,7 @@ def write_folder_indexes(
     space: Space,
     folder_infos: dict[str, FolderInfo],
     dirty_folders: set[Path] | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> list[Path]:
     """Write/merge one editable .index.yaml per folder — including folders that
     contain only subfolders, and the root — each listing its direct ``files:``
@@ -62,10 +63,17 @@ def write_folder_indexes(
     )
 
     written: list[Path] = []
-    for rel, info in folder_infos.items():
+    candidates = [
+        (rel, info)
+        for rel, info in folder_infos.items()
+        if dirty_resolved is None
+        or (space.root if info.is_root else space.root / rel).resolve() in dirty_resolved
+    ]
+    total = max(len(candidates), 1)
+    if progress is not None:
+        progress(0, total, "Writing folder indexes")
+    for i, (rel, info) in enumerate(candidates, 1):
         folder = space.root if info.is_root else space.root / rel
-        if dirty_resolved is not None and folder.resolve() not in dirty_resolved:
-            continue
         file_rows = [
             {
                 "name": e.path.name,
@@ -95,8 +103,17 @@ def write_folder_indexes(
             stale = index_store.index_path(folder)
             if stale.exists():
                 stale.unlink()
+                written.append(stale)
+            if progress is not None and (i == total or i % 50 == 0):
+                progress(i, total, f"Writing {rel or '.'}")
             continue
-        written.append(index_store.write_index(folder, file_rows, dir_rows))
+        changed = index_store.write_index_if_changed(folder, file_rows, dir_rows)
+        if changed is not None:
+            written.append(changed)
+        if progress is not None and (i == total or i % 50 == 0):
+            progress(i, total, f"Writing {rel or '.'}")
+    if progress is not None:
+        progress(total, total, "Wrote folder indexes")
     return written
 
 
@@ -423,10 +440,13 @@ def reindex(
 
     # When only some folders are dirty, also refresh their ancestors, whose
     # directory rollups changed.
-    _phase_start("Writing folder indexes")
     dirty = None if d.full_rebuild else _expand_dirty(d.folders, space.root)
-    indexes = write_folder_indexes(space, folder_infos, dirty_folders=dirty)
-    _phase_done("Wrote folder indexes")
+    indexes = write_folder_indexes(
+        space,
+        folder_infos,
+        dirty_folders=dirty,
+        progress=progress,
+    )
     _phase_start("Writing map")
     map_path = write_map(space, folder_infos)
     _phase_done("Wrote map")

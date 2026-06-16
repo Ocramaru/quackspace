@@ -8,7 +8,7 @@ from pathlib import Path
 
 from quack import catalog, folders
 from quack.generate import record
-from quack.indexer import _dirty_folders, reindex
+from quack.indexer import _dirty_folders, reindex, write_folder_indexes
 from quack.scaffold import scaffold_root
 from quack.core import Space
 
@@ -109,7 +109,38 @@ def test_reindex_detects_description_change_and_rebuilds(tmp_path):
     reindex(str(root))
     record(str(root), "a", "new description", [])
     result = reindex(str(root))
-    assert result["folder_indexes"] >= 1
+    assert result["catalog"] == "full"
+    assert result["folder_indexes"] == 0
+
+
+def test_write_folder_indexes_skips_identical_content(tmp_path):
+    root = _make_space(tmp_path)
+    space = Space.load(str(root))
+    infos = folders.resolve_folders(space)
+
+    first = write_folder_indexes(space, infos)
+    second = write_folder_indexes(space, infos)
+
+    assert first
+    assert second == []
+
+
+def test_write_folder_indexes_reports_folder_progress(tmp_path):
+    root = _make_space(tmp_path)
+    calls: list[tuple[int, int, str]] = []
+
+    space = Space.load(str(root))
+    infos = folders.resolve_folders(space)
+    write_folder_indexes(
+        space,
+        infos,
+        progress=lambda done, total, message: calls.append((done, total, message)),
+    )
+
+    assert calls[0][0] == 0
+    assert calls[0][1] == len(infos)
+    assert calls[0][2] == "Writing folder indexes"
+    assert calls[-1] == (len(infos), len(infos), "Wrote folder indexes")
 
 
 def test_reindex_detects_file_change_and_updates_catalog(tmp_path):
