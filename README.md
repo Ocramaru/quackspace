@@ -80,6 +80,8 @@ quack embed                 # build semantic embeddings
 quack new "Title" -f folder -d "..." -t tag,tag   # new markdown note
 quack doctor                # check links, descriptions, MCP registration
 quack clean --dry-run       # show generated artifacts clean would remove
+quack clean --diagrams      # remove only generated Mermaid diagrams
+quack clean --catalog --map # remove only catalog + map
 quack setup                 # choose an AI assistant
 quack mcp install           # register the MCP server with Claude Code / Kiro
 quack where                 # show workspace, state, package, and command paths
@@ -91,6 +93,10 @@ Fresh interactive `quack init` asks a couple setup questions before it writes:
 whether quack should manage generated-file `.gitignore` rules, and whether
 future `quack reindex` runs should generate Mermaid diagrams. Existing
 `.quack/config.yaml` files are preserved unless you pass an explicit flag.
+
+Interactive `quack clean` shows a small menu for cleanup scope. In scripts, it
+keeps the default safe behavior and removes only derived artifacts unless you
+pass flags like `--diagrams`, `--catalog --map`, or `--all`.
 
 ## The catalog
 

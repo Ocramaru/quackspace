@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import builtins
+import sys
 from pathlib import Path
 
 from quack import diagram
@@ -87,9 +89,36 @@ def test_clean_dry_run_reports_without_removing(tmp_path, capsys):
     assert main(["clean", "--dry-run", "--root", str(root)]) == 0
 
     out = capsys.readouterr().out
-    assert "would clean derived artifacts" in out
+    assert "quack clean preview (no deletes)" in out
+    assert "catalog:  1" in out
+    assert "map:      1" in out
+    assert "diagrams: 2" in out
     assert (root / ".quack" / "quack.duckdb").exists()
     assert (root / ".quack" / "map.yaml").exists()
+    assert (root / ".quack" / "diagram.md").exists()
+    assert (root / "notes" / "_diagrams.md").exists()
+
+
+def test_clean_can_remove_only_diagrams(tmp_path):
+    root = _space(tmp_path)
+
+    assert main(["clean", "--diagrams", "--root", str(root)]) == 0
+
+    assert (root / ".quack" / "quack.duckdb").exists()
+    assert (root / ".quack" / "map.yaml").exists()
+    assert not (root / ".quack" / "diagram.md").exists()
+    assert not (root / "notes" / "_diagrams.md").exists()
+
+
+def test_clean_interactive_menu_can_pick_catalog_and_map(tmp_path, monkeypatch):
+    root = _space(tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(builtins, "input", lambda _prompt: "3")
+
+    assert main(["clean", "--root", str(root)]) == 0
+
+    assert not (root / ".quack" / "quack.duckdb").exists()
+    assert not (root / ".quack" / "map.yaml").exists()
     assert (root / ".quack" / "diagram.md").exists()
     assert (root / "notes" / "_diagrams.md").exists()
 
@@ -100,7 +129,8 @@ def test_clean_all_dry_run_does_not_require_yes_or_remove(tmp_path, capsys):
     assert main(["clean", "--all", "--dry-run", "--root", str(root)]) == 0
 
     out = capsys.readouterr().out
-    assert "would uninstall quack" in out
+    assert "quack clean preview (no deletes)" in out
+    assert "mode: full uninstall" in out
     assert (root / ".quack").exists()
     assert (root / "QUACK.md").exists()
     assert (root / "notes" / ".index.yaml").exists()

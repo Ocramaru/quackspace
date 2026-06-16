@@ -67,6 +67,7 @@ def clean(
     explicit_root: str | None = None,
     purge: bool = False,
     dry_run: bool = False,
+    targets: set[str] | None = None,
 ) -> dict:
     """Remove quack's generated artifacts. Returns counts of what was removed,
     including ``extras`` (artifacts found by the disk scan that the catalog map
@@ -75,6 +76,9 @@ def clean(
     root = find_root(explicit_root)
     quack_dir = root / MARKER_DIR
     removed = {"catalog": 0, "map": 0, "diagrams": 0, "indexes": 0, "other": 0}
+    selected = targets or {"catalog", "map", "diagrams"}
+    if purge:
+        selected = {"catalog", "map", "diagrams", "indexes", "other"}
 
     # Fast map from the catalog + the catch-all scan; union, note the extras.
     known = _known_from_catalog(root)
@@ -84,6 +88,8 @@ def clean(
 
     # Derived state files inside .quack/ (config is kept on a derived clean).
     for name, key in ((DB_NAME, "catalog"), ("map.yaml", "map"), ("diagram.md", "diagrams")):
+        if key not in selected:
+            continue
         p = quack_dir / name
         if p.exists():
             if not dry_run:
@@ -91,16 +97,16 @@ def clean(
             removed[key] += 1
 
     for p in artifacts:
-        if p.name == DIAGRAM_NAME and p.exists():
+        if p.name == DIAGRAM_NAME and "diagrams" in selected and p.exists():
             if not dry_run:
                 p.unlink()
             removed["diagrams"] += 1
-        elif p.name == INDEX_NAME and purge and p.exists():
+        elif p.name == INDEX_NAME and "indexes" in selected and p.exists():
             if not dry_run:
                 p.unlink()
             removed["indexes"] += 1
 
-    if purge:
+    if "other" in selected:
         from .gitignore import remove_gitignore
         from .kiro import hook_definitions
 
@@ -128,6 +134,8 @@ def clean(
     removed["extras"] = sum(
         1
         for p in extras
-        if p.name == DIAGRAM_NAME or (purge and p.name == INDEX_NAME)
+        if (p.name == DIAGRAM_NAME and "diagrams" in selected)
+        or (p.name == INDEX_NAME and "indexes" in selected)
     )
+    removed["targets"] = sorted(selected)
     return removed

@@ -113,6 +113,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument(
         "--dry-run", action="store_true", help="show what would be removed without deleting anything"
     )
+    p_clean.add_argument(
+        "--catalog", action="store_true", help="remove only the DuckDB catalog"
+    )
+    p_clean.add_argument(
+        "--map", action="store_true", help="remove only .quack/map.yaml"
+    )
+    p_clean.add_argument(
+        "--diagrams", action="store_true", help="remove only generated Mermaid diagrams"
+    )
 
     p_doctor = sub.add_parser("doctor", help="health-check the root (files + MCP)")
     _add_root_arg(p_doctor)
@@ -449,6 +458,61 @@ def _ask_yes_no(prompt: str, default: bool = True) -> bool:
     return answer in ("y", "yes")
 
 
+def _clean_targets_from_args(args) -> set[str] | None:
+    targets = set()
+    if getattr(args, "catalog", False):
+        targets.add("catalog")
+    if getattr(args, "map", False):
+        targets.add("map")
+    if getattr(args, "diagrams", False):
+        targets.add("diagrams")
+    return targets or None
+
+
+def _choose_clean_mode() -> tuple[set[str] | None, bool] | None:
+    print("Choose what to clean:")
+    print("  1. derived artifacts (catalog, map, diagrams)")
+    print("  2. diagrams only")
+    print("  3. catalog and map only")
+    print("  4. full uninstall (also .index.yaml, QUACK.md, .quack/)")
+    print("  5. cancel")
+    try:
+        choice = input("Clean [1-5]: ").strip()
+    except EOFError:
+        choice = ""
+    if choice in ("", "1"):
+        return None, False
+    if choice == "2":
+        return {"diagrams"}, False
+    if choice == "3":
+        return {"catalog", "map"}, False
+    if choice == "4":
+        ok = _ask_yes_no(
+            "Full uninstall deletes authored .index.yaml metadata. Continue?",
+            default=False,
+        )
+        return (None, True) if ok else None
+    return None
+
+
+def _print_clean_report(removed: dict, *, purge: bool, dry_run: bool) -> None:
+    title = "quack clean preview (no deletes)" if dry_run else "✓ cleaned quack artifacts"
+    print(title)
+    mode = "full uninstall" if purge else ", ".join(removed.get("targets", []))
+    print(f"  mode: {mode or 'derived artifacts'}")
+    print(f"  catalog:  {removed['catalog']:,}")
+    print(f"  map:      {removed['map']:,}")
+    print(f"  diagrams: {removed['diagrams']:,}")
+    if purge or removed.get("indexes"):
+        print(f"  indexes:  {removed['indexes']:,}")
+    if purge or removed.get("other"):
+        print(f"  other:    {removed['other']:,}")
+    if removed.get("extras"):
+        print(f"  extras:   {removed['extras']:,} stray artifact(s) found by scan")
+    if not purge:
+        print("  rebuild:  quack reindex")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point: dispatch, turning expected failures into clean messages
     instead of tracebacks."""
@@ -532,9 +596,21 @@ def _dispatch(argv: list[str] | None) -> int:
         return 0
 
     if args.command == "clean":
+        from ._duck import swimming
         from .clean import clean
 
-        if args.purge and not args.yes and not args.dry_run:
+        targets = _clean_targets_from_args(args)
+        purge = args.purge
+        purge_confirmed = args.yes
+        if not purge and targets is None and not args.dry_run and sys.stdin.isatty():
+            chosen = _choose_clean_mode()
+            if chosen is None:
+                print("clean cancelled")
+                return 0
+            targets, purge = chosen
+            purge_confirmed = purge
+
+        if purge and not purge_confirmed and not args.dry_run:
             print(
                 "✗ `quack clean --all` fully uninstalls quack and DELETES authored\n"
                 "  .index.yaml descriptions, QUACK.md, and .quack/. This cannot be\n"
@@ -542,26 +618,12 @@ def _dispatch(argv: list[str] | None) -> int:
                 file=sys.stderr,
             )
             return 1
-        removed = clean(args.root, purge=args.purge, dry_run=args.dry_run)
-        if args.purge:
-            verb = "would uninstall" if args.dry_run else "uninstalled"
-            detail = "would remove" if args.dry_run else "removed"
-            print(
-                f"✓ {verb} quack: {detail} {removed['indexes']:,} index file(s), "
-                f"{removed['diagrams']:,} diagram(s), and the .quack/ layer"
-            )
-        else:
-            verb = "would clean" if args.dry_run else "cleaned"
-            print(
-                f"✓ {verb} derived artifacts: catalog, map, "
-                f"{removed['diagrams']:,} diagram(s). Run `quack reindex` to rebuild."
-            )
-        if removed.get("extras"):
-            verb = "would also remove" if args.dry_run else "also removed"
-            print(
-                f"  ({verb} {removed['extras']:,} stray artifact(s) found by scan "
-                "that the catalog didn't list)"
-            )
+        message = "Previewing clean" if args.dry_run else "Cleaning"
+        with swimming(message, total=1) as progress:
+            progress.update(0, 1, "Checking clean targets")
+            removed = clean(args.root, purge=purge, dry_run=args.dry_run, targets=targets)
+            progress.update(1, 1, "Clean preview ready" if args.dry_run else "Cleaned")
+        _print_clean_report(removed, purge=purge, dry_run=args.dry_run)
         return 0
 
     if args.command == "doctor":
@@ -757,19 +819,24 @@ def _dispatch(argv: list[str] | None) -> int:
                     default=True,
                 )
         if args.dry_run:
-            print("Would scaffold quack space (preview only; no writes):")
-            for path in preview_scaffold(str(target_root), manage_gitignore=manage_gitignore):
+            with swimming("Previewing init", total=1) as progress:
+                progress.update(0, 1, "Checking init plan")
+                paths = preview_scaffold(str(target_root), manage_gitignore=manage_gitignore)
+                progress.update(1, 1, "Preview ready")
+            print("quack init preview (no writes)")
+            print("paths:")
+            for path in paths:
                 print(f"  {path}")
             if config_existed:
-                print(f"  config: exists, would preserve {config_path}")
+                print(f"  config: exists, preserved by init: {config_path}")
             if args.no_gitignore:
                 print("  gitignore: skipped (--no-gitignore)")
             elif manage_gitignore:
-                print("  gitignore: would check repo .gitignore files during init")
+                print("  gitignore: repo .gitignore files checked during init")
             if args.no_reindex:
                 print("  reindex: skipped (--no-reindex)")
             else:
-                print("  reindex: would run")
+                print("  reindex: runs during init")
             return 0
         with swimming("Scaffolding", total=5) as progress:
             root = scaffold_root(

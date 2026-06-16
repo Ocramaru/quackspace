@@ -102,11 +102,12 @@ def test_init_dry_run_lists_writes_without_scaffolding(tmp_path, capsys, monkeyp
     assert main(["init", str(root), "--dry-run"]) == 0
 
     out = capsys.readouterr().out
-    assert "Would scaffold quack space (preview only; no writes):" in out
+    assert "quack init preview (no writes)" in out
+    assert "paths:" in out
     assert str(root.resolve() / ".quack") in out
     assert str(root.resolve() / "QUACK.md") in out
-    assert "gitignore: would check repo .gitignore files during init" in out
-    assert "reindex: would run" in out
+    assert "gitignore: repo .gitignore files checked during init" in out
+    assert "reindex: runs during init" in out
     assert not root.exists()
 
 
