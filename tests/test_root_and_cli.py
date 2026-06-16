@@ -102,7 +102,7 @@ def test_init_dry_run_lists_writes_without_scaffolding(tmp_path, capsys, monkeyp
     assert main(["init", str(root), "--dry-run"]) == 0
 
     out = capsys.readouterr().out
-    assert "quack init preview (no writes)" in out
+    assert "quack init preview" in out
     assert "paths:" in out
     assert str(root.resolve() / ".quack") in out
     assert str(root.resolve() / "QUACK.md") in out

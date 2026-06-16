@@ -89,7 +89,7 @@ def test_clean_dry_run_reports_without_removing(tmp_path, capsys):
     assert main(["clean", "--dry-run", "--root", str(root)]) == 0
 
     out = capsys.readouterr().out
-    assert "quack clean preview (no deletes)" in out
+    assert "quack clean preview" in out
     assert "catalog:  1" in out
     assert "map:      1" in out
     assert "diagrams: 2" in out
@@ -129,7 +129,7 @@ def test_clean_all_dry_run_does_not_require_yes_or_remove(tmp_path, capsys):
     assert main(["clean", "--all", "--dry-run", "--root", str(root)]) == 0
 
     out = capsys.readouterr().out
-    assert "quack clean preview (no deletes)" in out
+    assert "quack clean preview" in out
     assert "mode: full uninstall" in out
     assert (root / ".quack").exists()
     assert (root / "QUACK.md").exists()

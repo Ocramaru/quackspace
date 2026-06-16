@@ -496,7 +496,7 @@ def _choose_clean_mode() -> tuple[set[str] | None, bool] | None:
 
 
 def _print_clean_report(removed: dict, *, purge: bool, dry_run: bool) -> None:
-    title = "quack clean preview (no deletes)" if dry_run else "✓ cleaned quack artifacts"
+    title = "quack clean preview" if dry_run else "✓ cleaned quack artifacts"
     print(title)
     mode = "full uninstall" if purge else ", ".join(removed.get("targets", []))
     print(f"  mode: {mode or 'derived artifacts'}")
@@ -823,7 +823,7 @@ def _dispatch(argv: list[str] | None) -> int:
                 progress.update(0, 1, "Checking init plan")
                 paths = preview_scaffold(str(target_root), manage_gitignore=manage_gitignore)
                 progress.update(1, 1, "Preview ready")
-            print("quack init preview (no writes)")
+            print("quack init preview")
             print("paths:")
             for path in paths:
                 print(f"  {path}")
