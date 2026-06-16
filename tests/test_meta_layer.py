@@ -319,8 +319,8 @@ def test_cache_dirs_are_hidden_entirely(tmp_path):
 # catalog folders table + schema version — MAR-119
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_2():
-    assert catalog.SCHEMA_VERSION == 2
+def test_schema_version_is_3():
+    assert catalog.SCHEMA_VERSION == 3
 
 
 def test_folders_table_parent_mapping(tmp_path):
@@ -483,3 +483,42 @@ def test_folder_embeddings_built_and_searched(tmp_path):
     results = semantic_search_folders("login", explicit_root=str(root), limit=3)
     assert results  # returns (folder, parent, distance) tuples
     assert all(len(r) == 3 for r in results)
+
+
+def test_embedding_text_includes_file_metadata(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    note = root / "projects" / "alpha.md"
+    note.write_text("---\ndescription: Login flow\ntags: [auth, ui]\n---\nBody words\n[[target]]\n")
+    space = Space.load(str(root))
+    entry = next(e for e in space.entries if e.rel == "projects/alpha.md")
+
+    text = catalog.file_embed_text(entry)
+
+    assert "path: projects/alpha.md" in text
+    assert "name: alpha" in text
+    assert "folder: projects" in text
+    assert "type: md" in text
+    assert "tags: auth, ui" in text
+    assert "description: Login flow" in text
+    assert "links: target" in text
+    assert "body:\nBody words" in text
+
+
+def test_embedding_text_includes_folder_metadata(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "projects" / "alpha.py").write_text("print('alpha')\n")
+    space = Space.load(str(root))
+    infos = folders.resolve_folders(space)
+    by_folder = {}
+    for entry in space.entries:
+        by_folder.setdefault(entry.folder, []).append(entry)
+    kids = folders.children_index(infos)
+
+    text = catalog.folder_embed_text(infos["projects"], by_folder, kids)
+
+    assert "folder: projects" in text
+    assert "name: projects" in text
+    assert "parent: ." in text
+    assert "files:" in text
+    assert "children:" in text
+    assert "file alpha.py" in text

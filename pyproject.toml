@@ -44,6 +44,8 @@ Issues = "https://github.com/Ocramaru/quackspace/issues"
 [project.scripts]
 quack = "quack.cli:main"
 quack-mcp = "quack.mcp_server:main"
+quack-embed = "quack.embed_provider:main"
+quack-embed-ollama = "quack.embed_ollama:main"
 
 [build-system]
 requires = ["hatchling", "uv-dynamic-versioning>=0.7.0"]

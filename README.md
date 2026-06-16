@@ -76,6 +76,8 @@ quack graph path a b        # shortest link path between two files
 quack describe PATH -d "..." -t tag,tag   # record a description for any file
 quack generate              # AI: fill in missing descriptions
 quack generate --stale      # also refresh stale ones
+quack embed init            # choose embeddings (Ollama recommended)
+quack embed init --provider ollama --pull  # pull/use local nomic-embed-text
 quack embed                 # build semantic embeddings
 quack new "Title" -f folder -d "..." -t tag,tag   # new markdown note
 quack doctor                # check links, descriptions, MCP registration
@@ -91,8 +93,9 @@ Root resolution order: `--root` → walk up for `.quack/` → `$QUACK_ROOT` → 
 
 Fresh interactive `quack init` asks a couple setup questions before it writes:
 whether quack should manage generated-file `.gitignore` rules, and whether
-future `quack reindex` runs should generate Mermaid diagrams. Existing
-`.quack/config.yaml` files are preserved unless you pass an explicit flag.
+future `quack reindex` runs should generate Mermaid diagrams. It also offers
+to configure optional semantic-search embeddings. Existing `.quack/config.yaml`
+files are preserved unless you pass an explicit flag.
 
 Interactive `quack clean` shows a small menu for cleanup scope. In scripts, it
 keeps the default safe behavior and removes only derived artifacts unless you
@@ -113,7 +116,19 @@ pass flags like `--diagrams`, `--catalog --map`, or `--all`.
 - **Diagrams** are generated during `quack reindex` by default when folder
   indexes change. Set `index.diagrams: false` in `.quack/config.yaml`, or run
   `quack reindex --no-diagrams` to skip them once.
-- **`embeddings` / `folder_embeddings`**: separate vector spaces after `quack embed`
+- **`embeddings` / `folder_embeddings`**: separate vector spaces after
+  `quack embed init` configures an embedding command and `quack embed` builds
+  vectors. The recommended local setup is Ollama with `nomic-embed-text`; run
+  `quack embed init --provider ollama --pull` and QuackSpace will skip the pull
+  when the model is already installed. Interactive setup can offer to install
+  Ollama, start `ollama serve`, and pull the model when needed. QuackSpace also
+  ships a free no-setup fallback (`quack-embed`), and you can choose
+  `--provider custom --command "..."` with any command that prints a JSON array
+  of floats. Files embed labeled path, name, folder, type, tags, links,
+  description, and body. Folders embed labeled path, description, type/tag
+  rollups, and direct child names/descriptions. Re-running `quack embed`
+  refreshes missing or stale vectors and prunes deleted paths; use
+  `quack embed --rebuild` to recreate the vector cache from scratch.
 
 ```bash
 quack sql "SELECT folder, count(*) FROM files GROUP BY folder"

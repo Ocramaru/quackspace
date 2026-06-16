@@ -25,6 +25,8 @@ from pathlib import Path
 
 from . import __version__
 from .config import Config
+from .embed import EMBED_PROVIDER_CHOICES
+from .prompts import yes_no
 
 try:
     from rich_argparse import RichHelpFormatter
@@ -232,8 +234,42 @@ def build_parser() -> argparse.ArgumentParser:
     g_comp = graph_sub.add_parser("clusters", help="connected components")
     _add_root_arg(g_comp)
 
-    p_embed = sub.add_parser("embed", help="build semantic embeddings (DuckDB vss)")
+    p_embed = sub.add_parser("embed", help="build or configure semantic embeddings (DuckDB vss)")
     _add_root_arg(p_embed)
+    p_embed.add_argument(
+        "embed_command",
+        nargs="?",
+        choices=("init", "setup"),
+        help="use `init`/`setup` to configure the embedding command",
+    )
+    p_embed.add_argument(
+        "--command",
+        dest="embed_setup_command",
+        default=None,
+        help="embedding command for `quack embed init`; use {text} or stdin",
+    )
+    p_embed.add_argument(
+        "--provider",
+        choices=EMBED_PROVIDER_CHOICES,
+        default=None,
+        help="provider preset for `quack embed init`",
+    )
+    p_embed.add_argument(
+        "--pull",
+        action="store_true",
+        help="pull the Ollama embedding model during `quack embed init --provider ollama`",
+    )
+    p_embed.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help="embedding command timeout in seconds",
+    )
+    p_embed.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="drop existing vectors and rebuild the embedding cache",
+    )
 
     p_mcp = sub.add_parser("mcp", help="MCP server for LLM tool access")
     mcp_sub = p_mcp.add_subparsers(dest="mcp_command", metavar="<subcommand>")
@@ -336,11 +372,7 @@ def _run_mcp(args) -> int:
             if not args.yes:
                 print(f"\n{client.label} is a global config change. Command:")
                 print(f"  {register}")
-                try:
-                    ans = input(f"Register quack with {client.label}? [y/N] ").strip().lower()
-                except EOFError:
-                    ans = ""
-                if ans not in ("y", "yes"):
+                if not yes_no(f"Register quack with {client.label}?", default=False):
                     print("  skipped")
                     continue
             ok, out = mi.run_register(client.key, args.root, **limit_kwargs)
@@ -436,26 +468,45 @@ def _offer_setup(space_arg) -> bool:
         return False
     print("No AI assistant is set up yet.")
     print("The assistant writes short descriptions of your files and folders.")
-    try:
-        answer = input("Would you like to set one up now? [y/N] ").strip().lower()
-    except EOFError:
-        answer = ""
-    if answer not in ("y", "yes"):
+    if not yes_no("Would you like to set one up now?", default=False):
         print("Skipped. Run `quack setup` later, or write descriptions yourself.")
         return False
     result = run_setup(space_arg)
     return result.configured
 
 
-def _ask_yes_no(prompt: str, default: bool = True) -> bool:
-    suffix = " [Y/n] " if default else " [y/N] "
+def _maybe_setup_embeddings(root: str, *, can_build: bool) -> None:
+    if not sys.stdin.isatty():
+        return
+    config = Config.load(root)
+    if config.embed.configured and config.embed.provider != "builtin":
+        return
+    if not yes_no("Choose semantic search embedding provider?", default=True):
+        return
+    from .embed import run_embed_setup
+
     try:
-        answer = input(prompt + suffix).strip().lower()
-    except EOFError:
-        return default
-    if not answer:
-        return default
-    return answer in ("y", "yes")
+        result = run_embed_setup(root)
+    except RuntimeError as e:
+        print(f"  embeddings: skipped ({e})")
+        return
+    if not result.configured or not can_build:
+        return
+    if not yes_no("Build embeddings now?", default=False):
+        return
+    from ._duck import swimming
+    from .embed import build_embeddings
+
+    try:
+        with swimming("Embedding") as progress:
+            summary = build_embeddings(root, progress=progress.update)
+    except RuntimeError as e:
+        print(f"  embeddings: skipped ({e})")
+        return
+    print(
+        f"✓ embedded {summary['embedded']:,} file(s) + "
+        f"{summary['folders']:,} folder(s) (dim {summary['dim']})"
+    )
 
 
 def _clean_targets_from_args(args) -> set[str] | None:
@@ -487,7 +538,7 @@ def _choose_clean_mode() -> tuple[set[str] | None, bool] | None:
     if choice == "3":
         return {"catalog", "map"}, False
     if choice == "4":
-        ok = _ask_yes_no(
+        ok = yes_no(
             "Full uninstall deletes authored .index.yaml metadata. Continue?",
             default=False,
         )
@@ -721,6 +772,9 @@ def _dispatch(argv: list[str] | None) -> int:
             except EmbedNotConfigured:
                 print("No embeddings. Configure `embed.command` and run `quack embed`.")
                 return 1
+            except Exception as e:
+                print(f"No embeddings built yet ({e}). Run `quack embed`.")
+                return 1
             print(f"# root: {root}  (paths below are relative to it)")
             for rel, name, dist in rows:
                 print(f"{rel}  [cosine {dist:.3f}]")
@@ -781,16 +835,57 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command == "embed":
         from ._duck import swimming
-        from .embed import EmbedNotConfigured, build_embeddings
+        from .embed import EmbedNotConfigured, build_embeddings, run_embed_setup
+
+        if (
+            args.embed_command in ("init", "setup")
+            or args.embed_setup_command
+            or args.provider
+            or args.pull
+        ):
+            try:
+                result = run_embed_setup(
+                    args.root,
+                    command=args.embed_setup_command,
+                    provider=args.provider,
+                    pull=args.pull,
+                    timeout=args.timeout or Config.load(args.root).embed.timeout,
+                )
+            except RuntimeError as e:
+                print(f"✗ {e}", file=sys.stderr)
+                return 1
+            return 0 if result.configured else 1
 
         try:
             with swimming("Embedding") as progress:
-                result = build_embeddings(args.root, progress=progress.update)
+                result = build_embeddings(
+                    args.root,
+                    progress=progress.update,
+                    rebuild=args.rebuild,
+                    timeout=args.timeout,
+                )
         except EmbedNotConfigured:
-            print("No embedding command. Set `embed.command` in .quack/config.yaml,")
-            print("then run `quack embed`. It must print a JSON array of floats.")
+            print("No embedding command. Run `quack embed init`,")
+            print("or set `embed.command` in .quack/config.yaml.")
+            print("The command must print one JSON array of floats.")
             return 1
-        print(f"✓ embedded {result['embedded']} notes (dim {result['dim']})")
+        print(
+            f"✓ embedded {result['embedded']:,} file(s) + "
+            f"{result['folders']:,} folder(s) (dim {result['dim']})"
+        )
+        changed = (
+            result["updated"] + result["deleted"]
+            + result["folders_updated"] + result["folders_deleted"]
+        )
+        if changed:
+            print(
+                f"  refreshed: {result['updated']:,} file(s), "
+                f"{result['folders_updated']:,} folder(s); "
+                f"pruned: {result['deleted']:,} file(s), "
+                f"{result['folders_deleted']:,} folder(s)"
+            )
+        else:
+            print("  refreshed: already up to date")
         return 0
 
     if args.command == "init":
@@ -809,12 +904,12 @@ def _dispatch(argv: list[str] | None) -> int:
             diagrams_enabled = config.index.diagrams and not args.no_diagrams
         elif not args.dry_run and sys.stdin.isatty():
             if not args.no_gitignore:
-                manage_gitignore = _ask_yes_no(
+                manage_gitignore = yes_no(
                     "Add quack's generated files to .gitignore files?",
                     default=True,
                 )
             if not args.no_diagrams:
-                diagrams_enabled = _ask_yes_no(
+                diagrams_enabled = yes_no(
                     "Generate Mermaid diagrams during reindex?",
                     default=True,
                 )
@@ -887,6 +982,9 @@ def _dispatch(argv: list[str] | None) -> int:
                 print("  diagrams: skipped (index.diagrams: false)")
         print("\nChoose an assistant to auto-write descriptions (optional):\n")
         run_setup(str(root))
+        if not config_existed:
+            print("\nSemantic search embeddings are optional:\n")
+            _maybe_setup_embeddings(str(root), can_build=not args.no_reindex)
         print("\nNext: `cd` in and run `quack mcp install` to connect an LLM.")
         return 0
 
