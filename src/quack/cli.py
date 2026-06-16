@@ -757,13 +757,15 @@ def _dispatch(argv: list[str] | None) -> int:
                     default=True,
                 )
         if args.dry_run:
-            print("Would scaffold quack space:")
+            print("Would scaffold quack space (preview only; no writes):")
             for path in preview_scaffold(str(target_root), manage_gitignore=manage_gitignore):
                 print(f"  {path}")
             if config_existed:
                 print(f"  config: exists, would preserve {config_path}")
             if args.no_gitignore:
                 print("  gitignore: skipped (--no-gitignore)")
+            elif manage_gitignore:
+                print("  gitignore: would check repo .gitignore files during init")
             if args.no_reindex:
                 print("  reindex: skipped (--no-reindex)")
             else:

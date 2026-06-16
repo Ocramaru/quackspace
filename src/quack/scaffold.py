@@ -11,7 +11,7 @@ import frontmatter
 import yaml
 
 from .core import MARKER_DIR, find_root
-from .gitignore import GitignoreSummary, preview_gitignore
+from .gitignore import GitignoreSummary
 
 TEMPLATE_KEYS = ("description", "tags", "created", "updated")
 
@@ -168,11 +168,10 @@ def preview_scaffold(target: str | None = None, manage_gitignore: bool = True) -
         root / ".quackignore",
         root / ".quack" / "config.yaml",
     ]
+    if manage_gitignore:
+        paths.insert(1, root / ".quack" / ".gitignore")
     if is_new:
         paths.extend(root / folder for folder in STARTER_FOLDERS)
-    if manage_gitignore:
-        summary = preview_gitignore(root)
-        paths.extend(summary.updated)
     return [str(path) for path in dict.fromkeys(paths)]
 
 

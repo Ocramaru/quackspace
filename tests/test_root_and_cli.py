@@ -102,11 +102,23 @@ def test_init_dry_run_lists_writes_without_scaffolding(tmp_path, capsys, monkeyp
     assert main(["init", str(root), "--dry-run"]) == 0
 
     out = capsys.readouterr().out
-    assert "Would scaffold quack space:" in out
+    assert "Would scaffold quack space (preview only; no writes):" in out
     assert str(root.resolve() / ".quack") in out
     assert str(root.resolve() / "QUACK.md") in out
+    assert "gitignore: would check repo .gitignore files during init" in out
     assert "reindex: would run" in out
     assert not root.exists()
+
+
+def test_init_dry_run_does_not_scan_gitignore_repos(tmp_path, monkeypatch):
+    root = tmp_path / "space"
+    monkeypatch.setattr(
+        "quack.scaffold.preview_gitignore",
+        lambda _root: pytest.fail("dry-run should stay cheap"),
+        raising=False,
+    )
+
+    assert main(["init", str(root), "--dry-run"]) == 0
 
 
 def test_init_no_gitignore_skips_repo_gitignore(tmp_path, capsys, monkeypatch):
