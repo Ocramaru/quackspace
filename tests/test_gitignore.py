@@ -236,7 +236,7 @@ def test_find_descendant_git_roots(tmp_path):
     assert set(found) == {alpha, beta}
 
 
-def test_find_descendant_git_roots_skips_ignored_heavy_dirs(tmp_path):
+def test_find_descendant_git_roots_skips_configured_ignored_dirs(tmp_path):
     quack_root = _make_quack_root(tmp_path / "space")
     visible = _make_git_repo(quack_root / "projects" / "visible")
     hidden = _make_git_repo(quack_root / "node_modules" / "hidden")
@@ -251,6 +251,19 @@ def test_find_descendant_git_roots_skips_ignored_heavy_dirs(tmp_path):
     assert hidden not in found
     assert scanned >= 2
     assert skipped >= 1
+
+
+def test_ensure_gitignore_uses_quackignore_for_scan_pruning(tmp_path):
+    quack_root = _make_quack_root(tmp_path / "space")
+    visible = _make_git_repo(quack_root / "projects" / "visible")
+    hidden = _make_git_repo(quack_root / "node_modules" / "hidden")
+    (quack_root / ".quackignore").write_text("node_modules\n")
+
+    summary = ensure_gitignore(quack_root)
+
+    assert visible in summary.protected
+    assert hidden not in summary.protected
+    assert summary.skipped_dirs >= 1
 
 
 def test_nested_git_repos_get_managed_block(tmp_path):

@@ -229,9 +229,9 @@ def ensure_gitignore(
 
     # Nested repos: git repos that live beneath the quack root.
     try:
-        from .core import DEFAULT_OPAQUE_DIRS, load_ignores
+        from .core import load_ignores
 
-        patterns = load_ignores(quack_root) | set(DEFAULT_OPAQUE_DIRS)
+        patterns = load_ignores(quack_root)
     except Exception:
         patterns = {".git", ".quack"}
     if progress is not None:
