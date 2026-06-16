@@ -281,6 +281,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="drop existing vectors and rebuild the embedding cache",
     )
+    p_embed.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="parallel embedding workers (default: min(cpu_count, 8)); use 1 to disable",
+    )
 
     p_mcp = sub.add_parser("mcp", help="MCP server for LLM tool access")
     mcp_sub = p_mcp.add_subparsers(dest="mcp_command", metavar="<subcommand>")
@@ -899,6 +905,7 @@ def _dispatch(argv: list[str] | None) -> int:
                     progress=progress.update,
                     rebuild=args.rebuild,
                     timeout=args.timeout,
+                    workers=args.workers,
                 )
         except EmbedNotConfigured:
             print("No embedding command. Run `quack embed init`,")

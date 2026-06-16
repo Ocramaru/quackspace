@@ -13,6 +13,7 @@ floats. {text} is substituted, or the text is piped on stdin.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -93,24 +94,46 @@ class EmbedSetupResult:
     dim: int = 0
 
 
+def _ok(msg: str) -> None:
+    """Print a success line, green checkmark on TTYs."""
+    if sys.stdout.isatty() and not os.environ.get("NO_COLOR"):
+        print(f"\x1b[1;32m✓\x1b[0m {msg}")
+    else:
+        print(f"✓ {msg}")
+
+
+def _warn(msg: str) -> None:
+    """Print a warning line, yellow on TTYs."""
+    if sys.stdout.isatty() and not os.environ.get("NO_COLOR"):
+        print(f"  \x1b[1;33m⚠\x1b[0m {msg}")
+    else:
+        print(f"  ! {msg}")
+
+
+def _run_cmd(
+    argv: list[str],
+    *,
+    stdin_text: str | None = None,
+    timeout: int,
+    kind: str,
+) -> "subprocess.CompletedProcess[str]":
+    """Run a command with captured output. Raises RuntimeError on failure."""
+    try:
+        return subprocess.run(
+            argv, input=stdin_text, capture_output=True, text=True, timeout=timeout
+        )
+    except FileNotFoundError:
+        raise RuntimeError(f"{kind} command not found: {argv[0]!r}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{kind} timed out after {timeout}s")
+
+
 def _embed_text(cfg, text: str) -> list[float]:
     argv = shlex.split(cfg.command)
     if not cfg.uses_stdin:
         argv = [part.replace("{text}", text) for part in argv]
     stdin = text if cfg.uses_stdin else None
-    try:
-        proc = subprocess.run(
-            argv, input=stdin, capture_output=True, text=True, timeout=cfg.timeout
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            f"Embedding command not found: '{argv[0]}'. Fix `embed.command` in "
-            ".quack/config.yaml."
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(
-            f"Embedding command timed out after {cfg.timeout}s running {argv[0]!r}."
-        )
+    proc = _run_cmd(argv, stdin_text=stdin, timeout=cfg.timeout, kind="Embedding")
     if proc.returncode != 0:
         raise RuntimeError(
             failure_message("Embedding", argv, proc.returncode, proc.stdout, proc.stderr)
@@ -181,7 +204,7 @@ def run_embed_setup(
         timeout=timeout,
         provider=selected_provider,
     )
-    print(f"✓ configured {selected_provider} embeddings (dim {dim})")
+    _ok(f"configured {selected_provider} embeddings (dim {dim})")
     print("  Run `quack embed` to build semantic search vectors.")
     return EmbedSetupResult(
         configured=True, command=command, provider=selected_provider, dim=dim
@@ -202,10 +225,10 @@ def _choose_provider_interactive(pull: bool, timeout: int) -> tuple[str, str, bo
         preset = EMBED_PROVIDERS[provider]
         if preset.can_pull:
             if not _ollama_binary_exists():
-                print("  Ollama is not installed.")
+                _warn("Ollama is not installed.")
                 if yes_no("Install Ollama now?", default=True):
                     if not _install_ollama(timeout=timeout):
-                        print("  Ollama install was not completed.")
+                        _warn("Ollama install was not completed.")
                 if not _ollama_binary_exists():
                     print("  You can install Ollama later and rerun `quack embed init`.")
                     if yes_no("Use the built-in local embedder instead?", default=True):
@@ -215,7 +238,7 @@ def _choose_provider_interactive(pull: bool, timeout: int) -> tuple[str, str, bo
             try:
                 _ensure_ollama_server(timeout=timeout)
             except RuntimeError as e:
-                print(f"  {e}")
+                _warn(str(e))
                 if yes_no("Use the built-in local embedder instead?", default=True):
                     builtin = EMBED_PROVIDERS["builtin"]
                     return builtin.key, builtin.command, False
@@ -243,15 +266,13 @@ def _ask_custom_command() -> str:
 
 def _pull_ollama_model(model: str, timeout: int) -> None:
     if _ollama_model_exists(model):
-        print(f"Ollama model `{model}` is already installed.")
+        print(f"  Ollama model {model!r} already installed.")
         return
-    print(f"Pulling Ollama model `{model}`...")
+    print(f"Pulling Ollama model {model!r} (this may take a few minutes)...")
     try:
         proc = subprocess.run(
             ["ollama", "pull", model],
-            capture_output=True,
-            text=True,
-            timeout=max(timeout, 120),
+            timeout=max(timeout, 300),
         )
     except FileNotFoundError as e:
         raise RuntimeError(
@@ -261,15 +282,7 @@ def _pull_ollama_model(model: str, timeout: int) -> None:
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(f"`ollama pull {model}` timed out.") from e
     if proc.returncode != 0:
-        raise RuntimeError(
-            failure_message(
-                "Ollama pull",
-                ["ollama", "pull", model],
-                proc.returncode,
-                proc.stdout,
-                proc.stderr,
-            )
-        )
+        raise RuntimeError(f"Ollama pull failed (exit code {proc.returncode}).")
 
 
 def _ollama_server_ready() -> bool:
@@ -319,21 +332,17 @@ def _install_ollama(timeout: int) -> bool:
         print("  Automatic Ollama install is not available on this system.")
         print("  Install it from https://ollama.com/download")
         return False
-    print("Installing Ollama...")
+    print("Installing Ollama (this may take a few minutes)...")
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=max(timeout, 300),
-        )
+        # Stream installer output directly so the user sees real-time progress.
+        proc = subprocess.run(cmd, timeout=max(timeout, 300))
     except subprocess.TimeoutExpired:
-        print("  Ollama install timed out.")
+        _warn("Ollama install timed out.")
         return False
     if proc.returncode != 0:
-        print(failure_message("Ollama install", cmd, proc.returncode, proc.stdout, proc.stderr))
+        _warn(f"Ollama install failed (exit code {proc.returncode}).")
         return False
-    print("  Ollama installed.")
+    _ok("Ollama installed.")
     return True
 
 
@@ -365,13 +374,20 @@ def build_embeddings(
     *,
     rebuild: bool = False,
     timeout: int | None = None,
+    workers: int | None = None,
 ) -> dict:
     """Refresh file and folder embeddings in the catalog.
 
     Embeddings are a derived cache keyed by file ``rel`` or folder path plus a
     hash of the exact source text that produced the vector. By default this
     updates missing/stale rows and prunes deleted rows; ``rebuild=True`` drops
-    the cache and starts over."""
+    the cache and starts over.
+
+    ``workers`` controls how many embedding calls run in parallel. The default
+    (None) picks ``min(cpu_count, 8)``. Set to 1 to disable parallelism.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     config = Config.load(explicit_root)
     if not config.embed.configured:
         raise EmbedNotConfigured()
@@ -414,17 +430,20 @@ def build_embeddings(
 
         existing_dim = _existing_vector_dim(con)
         dim = config.embed.dim or existing_dim
-        first_key = None
-        first_vec: list[float] | None = None
+
+        # If dim is still unknown we need to embed one item to discover it.
+        # We probe file_items[0] (or folder_items[0]) regardless of the cache:
+        # if it turns out to be cached, the probe call is wasted — same trade-off
+        # as the pre-parallel code. If it isn't cached, we reuse the result.
+        probe_key: tuple | None = None
+        probe_vec: list[float] | None = None
         if not dim:
-            first_text = file_items[0][3] if file_items else (
-                folder_items[0][3] if folder_items else ""
-            )
-            first_vec = _embed_text(config.embed, first_text) if first_text else []
-            first_key = ("file", file_items[0][0]) if file_items else (
-                ("folder", folder_items[0][0]) if folder_items else None
-            )
-            dim = len(first_vec)
+            probe_text = (file_items[0][3] if file_items else
+                          (folder_items[0][3] if folder_items else ""))
+            if probe_text:
+                probe_vec = _embed_text(config.embed, probe_text)
+                dim = len(probe_vec)
+                probe_key = ("f", file_items[0][0]) if file_items else ("d", folder_items[0][0])
         if not dim:
             raise RuntimeError("Could not determine embedding dimension.")
 
@@ -434,8 +453,8 @@ def build_embeddings(
             con.execute("DROP TABLE IF EXISTS embedding_runs;")
 
         _ensure_embedding_schema(con, dim)
-        total_items = len(file_items) + len(folder_items)
-        total = total_items + 3
+        # Read existing hashes AFTER any potential rebuild drop so that rebuild=True
+        # correctly treats all items as uncached.
         old_files = _existing_hashes(con, "embeddings", "rel")
         old_folders = _existing_hashes(con, "folder_embeddings", "folder")
         con.execute("BEGIN TRANSACTION")
@@ -446,45 +465,94 @@ def build_embeddings(
             con, "folder_embeddings", "folder", [r for r, _, _, _ in folder_items]
         )
 
-        updated_files = skipped_files = updated_folders = skipped_folders = 0
-        for i, (rel, name, source_hash, text) in enumerate(file_items):
-            if progress is not None:
-                progress(i, total, f"Embedding {rel}")
+        # Build the work queue: items whose hash changed since last run.
+        # type tag: 'f' = file, 'd' = folder.
+        todo: list[tuple] = []
+        skipped_files = skipped_folders = 0
+        for rel, name, source_hash, text in file_items:
             if old_files.get(rel) == source_hash:
                 skipped_files += 1
-                continue
-            vec = (
-                first_vec
-                if first_key == ("file", rel)
-                else _embed_text(config.embed, text)
-            )
-            con.execute("DELETE FROM embeddings WHERE rel = ?", [rel])
-            con.execute(
-                "INSERT INTO embeddings VALUES (?, ?, ?, ?)",
-                [name, rel, source_hash, vec],
-            )
-            updated_files += 1
-
-        for j, (rel, parent, source_hash, text) in enumerate(folder_items):
-            if progress is not None:
-                progress(len(file_items) + j, total, f"Embedding {rel}/")
+            else:
+                todo.append(("f", rel, name, source_hash, text))
+        for rel, parent, source_hash, text in folder_items:
             if old_folders.get(rel) == source_hash:
                 skipped_folders += 1
-                continue
-            vec = (
-                first_vec
-                if first_key == ("folder", rel)
-                else _embed_text(config.embed, text)
+            else:
+                todo.append(("d", rel, parent, source_hash, text))
+
+        n_todo = len(todo)
+        total = n_todo + 3  # +3: two HNSW index steps + embedding_runs record
+        n_workers = min(workers or (os.cpu_count() or 4), 8)
+        cfg = config.embed
+
+        def _do_embed(item: tuple) -> tuple:
+            return item, _embed_text(cfg, item[4])
+
+        # If the probed item is in the work queue, reuse the result so it isn't
+        # embedded twice. Items not needing embedding are skipped above already.
+        probe_in_todo = probe_key is not None and any(
+            item[0] == probe_key[0] and item[1] == probe_key[1] for item in todo
+        )
+        done_count = 0
+        results: list[tuple] = []
+
+        if probe_in_todo:
+            # First item of todo is the probe item; seed results with its vector.
+            probe_item = next(
+                item for item in todo
+                if item[0] == probe_key[0] and item[1] == probe_key[1]
             )
-            con.execute("DELETE FROM folder_embeddings WHERE folder = ?", [rel])
-            con.execute(
-                "INSERT INTO folder_embeddings VALUES (?, ?, ?, ?)",
-                [rel, parent, source_hash, vec],
-            )
-            updated_folders += 1
+            results.append((probe_item, probe_vec))
+            done_count = 1
+            if progress is not None:
+                label = probe_item[1] + ("/" if probe_item[0] == "d" else "")
+                progress(done_count, total, f"Embedded {label}")
+            todo_remaining = [item for item in todo if not (item[0] == probe_key[0] and item[1] == probe_key[1])]
+        else:
+            todo_remaining = todo
+
+        # Embed in parallel: _embed_text is subprocess/HTTP only — no DuckDB
+        # access — so threads are safe and the GIL releases freely.
+        if todo_remaining:
+            if n_workers == 1 or len(todo_remaining) == 1:
+                for item in todo_remaining:
+                    done_count += 1
+                    if progress is not None:
+                        label = item[1] + ("/" if item[0] == "d" else "")
+                        progress(done_count, total, f"Embedding {label}")
+                    results.append(_do_embed(item))
+            else:
+                with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                    futures = {pool.submit(_do_embed, item): item for item in todo_remaining}
+                    for fut in as_completed(futures):
+                        item_result, vec = fut.result()  # re-raises on embedding error
+                        results.append((item_result, vec))
+                        done_count += 1
+                        if progress is not None:
+                            label = item_result[1] + ("/" if item_result[0] == "d" else "")
+                            progress(done_count, total, f"Embedded {label}")
+
+        # Write all results to DuckDB sequentially in the main thread.
+        updated_files = updated_folders = 0
+        for item, vec in results:
+            kind, rel, name_or_parent, source_hash, _ = item
+            if kind == "f":
+                con.execute("DELETE FROM embeddings WHERE rel = ?", [rel])
+                con.execute(
+                    "INSERT INTO embeddings VALUES (?, ?, ?, ?)",
+                    [name_or_parent, rel, source_hash, vec],
+                )
+                updated_files += 1
+            else:
+                con.execute("DELETE FROM folder_embeddings WHERE folder = ?", [rel])
+                con.execute(
+                    "INSERT INTO folder_embeddings VALUES (?, ?, ?, ?)",
+                    [rel, name_or_parent, source_hash, vec],
+                )
+                updated_folders += 1
 
         if progress is not None:
-            progress(total_items, total, "Indexing file vectors")
+            progress(n_todo, total, "Indexing file vectors")
         _ensure_hnsw_index(
             con,
             "embeddings",
@@ -492,7 +560,7 @@ def build_embeddings(
             rebuild=bool(updated_files or deleted_files or rebuild),
         )
         if progress is not None:
-            progress(total_items + 1, total, "Indexing folder vectors")
+            progress(n_todo + 1, total, "Indexing folder vectors")
         _ensure_hnsw_index(
             con,
             "folder_embeddings",
@@ -502,7 +570,7 @@ def build_embeddings(
         n_folders = con.execute("SELECT count(*) FROM folder_embeddings").fetchone()[0]
         n = con.execute("SELECT count(*) FROM embeddings").fetchone()[0]
         if progress is not None:
-            progress(total_items + 2, total, "Recording embedding run")
+            progress(n_todo + 2, total, "Recording embedding run")
         con.execute(
             "INSERT INTO embedding_runs VALUES (now(), ?, ?, ?, ?, ?, ?, ?, ?)",
             [
