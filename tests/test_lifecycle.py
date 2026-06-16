@@ -86,7 +86,9 @@ def test_reindex_fast_noop_reports_file_progress(sample_space):
 
     assert summary["folder_indexes"] == 0
     assert summary["files"] == 3
-    assert calls[0] == (0, 3, "Checking files")
+    assert calls[0] == (0, None, "Waddling the files: 0")
+    assert (3, None, "Waddled 3 file(s)") in calls
+    assert (0, 3, "Checking files") in calls
     assert calls[-1][0] == 3
     assert calls[-1][1] == 3
     assert calls[-1][2].startswith("Checking ")
@@ -101,14 +103,14 @@ def test_reindex_reports_post_scan_phases(sample_space):
         progress=lambda done, total, message: calls.append((done, total, message)),
     )
 
-    assert (0, 1, "Counting files") in calls
-    assert (1, 1, "Counted files") in calls
+    assert (0, None, "Waddling the files: 0") in calls
+    assert (3, None, "Waddled 3 file(s)") in calls
     assert (0, 1, "Loading file contents") in calls
     assert (0, 1, "Applying metadata") in calls
     assert (1, 1, "Applied metadata") in calls
-    assert (0, 1, "Resolving folder metadata") in calls
+    assert (0, -1, "Resolving folder metadata") in calls
     assert (1, 1, "Resolved folder metadata") in calls
-    assert (0, 1, "Checking catalog changes") in calls
+    assert (0, -1, "Checking catalog changes") in calls
     assert (1, 1, "Checked catalog changes") in calls
 
 

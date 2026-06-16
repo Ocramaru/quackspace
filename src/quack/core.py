@@ -380,11 +380,19 @@ def walk(
     return entries, folders
 
 
-def count_indexable(root: Path, ignores: set[str] | None = None) -> int:
+def count_indexable(
+    root: Path,
+    ignores: set[str] | None = None,
+    progress: "Callable[[int, int | None, str], None] | None" = None,
+) -> int:
     """Count the files :func:`walk` would index, without reading any of them.
-    Cheap (stat/scandir only); used to get a total up front for a progress bar."""
+    Cheap (stat/scandir only); used to get a total up front for later progress.
+    When *progress* is supplied, reports an unbounded counter rather than a
+    percentage bar because the total is exactly what this pass is discovering."""
     patterns = ignores if ignores is not None else load_ignores(root)
     n = 0
+    if progress is not None:
+        progress(0, None, "Waddling the files: 0")
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
         _record, descend = _level(base, dirnames, root, patterns)
@@ -393,6 +401,10 @@ def count_indexable(root: Path, ignores: set[str] | None = None) -> int:
             rel = (base / fn).relative_to(root).as_posix()
             if _keep_file(fn, rel, patterns):
                 n += 1
+                if progress is not None and n % 100 == 0:
+                    progress(n, None, f"Waddling the files: {n:,}")
+    if progress is not None:
+        progress(n, None, f"Waddled {n:,} file(s)")
     return n
 
 
@@ -416,7 +428,7 @@ def scan_signature(
     seen. Used for a cheap reindex no-op check before paying for a full
     :func:`walk`."""
     patterns = ignores if ignores is not None else load_ignores(root)
-    total = count_indexable(root, patterns) if progress is not None else 0
+    total = count_indexable(root, patterns, progress=progress) if progress is not None else 0
     seen = 0
     if progress is not None:
         progress(0, max(total, 1), "Checking files")
@@ -486,9 +498,7 @@ class Space:
         root = find_root(explicit)
         on_file = None
         if progress is not None:
-            progress(0, 1, "Counting files")
-            total = count_indexable(root)
-            progress(1, 1, "Counted files")
+            total = count_indexable(root, progress=progress)
             seen = {"n": 0}
 
             def on_file(entry: Entry) -> None:

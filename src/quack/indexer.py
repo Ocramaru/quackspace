@@ -409,7 +409,7 @@ def reindex(
 
     def _phase_start(message: str) -> None:
         if progress is not None:
-            progress(0, 1, message)
+            progress(0, -1, message)
 
     def _phase_done(message: str) -> None:
         if progress is not None:
