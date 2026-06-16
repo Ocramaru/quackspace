@@ -416,6 +416,7 @@ def test_write_config_preserves_existing_defaults(tmp_path):
         "body_max_bytes": 1_000_000,
         "tag_rollup_limit": 5,
         "opaque_dirs": [],
+        "diagram_max_depth": 3,
     }
     assert data["lake"] == {
         "enabled": True,
