@@ -20,6 +20,7 @@ $QUACK_ROOT / $OBSIDIAN_VAULT).
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -239,8 +240,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_embed.add_argument(
         "embed_command",
         nargs="?",
-        choices=("init", "setup"),
-        help="use `init`/`setup` to configure the embedding command",
+        choices=("init", "setup", "text"),
+        help="use `init`/`setup`; provider command: `text`",
+    )
+    p_embed.add_argument(
+        "embed_args",
+        nargs="*",
+        help=argparse.SUPPRESS,
     )
     p_embed.add_argument(
         "--command",
@@ -252,7 +258,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--provider",
         choices=EMBED_PROVIDER_CHOICES,
         default=None,
-        help="provider preset for `quack embed init`",
+        help="provider preset for `quack embed init`; also used by `quack embed text`",
+    )
+    p_embed.add_argument(
+        "--model",
+        default=None,
+        help="embedding model for `quack embed text --provider ollama`",
     )
     p_embed.add_argument(
         "--pull",
@@ -457,6 +468,28 @@ def _run_generate(args) -> bool:
             reindex(args.root, progress=progress.update)
         print("  reindexed")
     return True
+
+
+def _run_embed_provider_command(args) -> int:
+    text = " ".join(args.embed_args) if args.embed_args else sys.stdin.read()
+    if args.embed_command == "text":
+        provider = args.provider or "builtin"
+        if provider == "builtin":
+            from .embed_provider import embed
+
+            print(json.dumps(embed(text)))
+            return 0
+        if provider == "ollama":
+            from .embed_ollama import DEFAULT_MODEL, embed
+
+            print(json.dumps(embed(text, model=args.model or DEFAULT_MODEL)))
+            return 0
+        print(
+            "`quack embed text` supports --provider builtin or --provider ollama.",
+            file=sys.stderr,
+        )
+        return 1
+    return 1
 
 
 def _offer_setup(space_arg) -> bool:
@@ -836,6 +869,9 @@ def _dispatch(argv: list[str] | None) -> int:
     if args.command == "embed":
         from ._duck import swimming
         from .embed import EmbedNotConfigured, build_embeddings, run_embed_setup
+
+        if args.embed_command == "text":
+            return _run_embed_provider_command(args)
 
         if (
             args.embed_command in ("init", "setup")

@@ -177,7 +177,7 @@ def _default_defaults_config() -> dict:
 def _default_embed_config() -> dict:
     return {
         "provider": "builtin",
-        "command": "quack-embed",
+        "command": "quack embed text",
         "dim": 256,
         "timeout": DEFAULT_AI_TIMEOUT,
     }
@@ -264,7 +264,7 @@ def write_config(
         "  # print one JSON array of floats; if {text} is omitted, text is piped\n"
         "  # on stdin.\n"
         "  provider: builtin\n"
-        "  command: quack-embed\n"
+        "  command: quack embed text\n"
         "  dim: 256\n"
         f"  timeout: {DEFAULT_AI_TIMEOUT}\n"
         "\n"

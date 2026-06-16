@@ -141,7 +141,7 @@ def test_embed_init_rejects_invalid_command_without_writing(tmp_path):
     ]) == 1
 
     config = yaml.safe_load((root / ".quack" / "config.yaml").read_text())
-    assert config["embed"]["command"] == "quack-embed"
+    assert config["embed"]["command"] == "quack embed text"
     assert config["embed"]["provider"] == "builtin"
 
 
@@ -373,6 +373,37 @@ def test_builtin_embed_provider_returns_normalized_vector():
     assert len(vec) == 256
     assert any(v != 0 for v in vec)
     assert sum(v * v for v in vec) == pytest.approx(1.0)
+
+
+def test_embed_text_subcommand_prints_json_vector(capsys, monkeypatch):
+    import io
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("path: a.py\nbody: search"))
+
+    assert main(["embed", "text"]) == 0
+
+    vec = json.loads(capsys.readouterr().out)
+    assert len(vec) == 256
+
+
+def test_embed_ollama_text_subcommand_prints_json_vector(capsys, monkeypatch):
+    import io
+
+    from quack import embed_ollama
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("body: search"))
+    monkeypatch.setattr(embed_ollama, "embed", lambda text, model: [len(text), len(model)])
+
+    assert main([
+        "embed",
+        "text",
+        "--provider",
+        "ollama",
+        "--model",
+        "nomic-embed-text",
+    ]) == 0
+
+    assert json.loads(capsys.readouterr().out) == [12, 16]
 
 
 def test_embed_refresh_skips_unchanged_updates_stale_and_prunes_deleted(tmp_path):

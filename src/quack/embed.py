@@ -40,11 +40,9 @@ from .core import Space, find_root
 from .prompts import Choice, choice, is_interactive, text, yes_no
 from .subprocess_utils import failure_message
 
-DEFAULT_EMBED_COMMAND = f"{shlex.quote(sys.executable)} -m quack.embed_provider"
+DEFAULT_EMBED_COMMAND = "quack embed text"
 OLLAMA_MODEL = "nomic-embed-text"
-OLLAMA_EMBED_COMMAND = (
-    f"{shlex.quote(sys.executable)} -m quack.embed_ollama {OLLAMA_MODEL}"
-)
+OLLAMA_EMBED_COMMAND = f"quack embed text --provider ollama --model {OLLAMA_MODEL}"
 
 
 @dataclass(frozen=True)

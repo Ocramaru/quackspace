@@ -122,7 +122,7 @@ pass flags like `--diagrams`, `--catalog --map`, or `--all`.
   `quack embed init --provider ollama --pull` and QuackSpace will skip the pull
   when the model is already installed. Interactive setup can offer to install
   Ollama, start `ollama serve`, and pull the model when needed. QuackSpace also
-  ships a free no-setup fallback (`quack-embed`), and you can choose
+  ships a free no-setup fallback (`quack embed text`), and you can choose
   `--provider custom --command "..."` with any command that prints a JSON array
   of floats. Files embed labeled path, name, folder, type, tags, links,
   description, and body. Folders embed labeled path, description, type/tag
