@@ -91,7 +91,9 @@ def write_global_diagram(space: Space) -> Path:
     """One whole-graph diagram of the linked files, grouped into folder
     subgraphs. Files with no links are omitted to keep the graph legible."""
     all_names = set(space.by_name)
-    linked = [e for e in space.entries if e.links or e.name in _linked_targets(space)]
+    # Bind once: referencing _linked_targets() inside the comprehension is O(n²).
+    linked_targets = _linked_targets(space)
+    linked = [e for e in space.entries if e.links or e.name in linked_targets]
     by_folder: dict[str, list] = defaultdict(list)
     for e in linked:
         by_folder[e.folder or "(root)"].append(e)

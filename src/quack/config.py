@@ -13,7 +13,9 @@ config.yaml shape:
       timeout: 120        # seconds
 
     index:
-      store_body: true     # set false to keep file text out of DuckDB
+      store_body: true            # set false to keep file text out of DuckDB
+      dataset_threshold: 10000     # folders over this many files are skipped
+      dataset_ext_threshold: 500   # or this many of one bulk-data type (.npy, .png…)
 
 When no command is set, the AI is "not configured": `quack generate` offers
 to run `quack setup` rather than failing with a traceback.
@@ -38,6 +40,17 @@ DEFAULT_HIDDEN_DIR_PENALTY = 1.0
 DEFAULT_LOCAL_DIR_BOOST = 1.5
 DEFAULT_STORE_BODY = True
 DEFAULT_DIAGRAMS = True
+DEFAULT_DATASET_THRESHOLD = 10_000
+DEFAULT_DATASET_EXT_THRESHOLD = 500
+DEFAULT_BODY_MAX_BYTES = 1_000_000
+DEFAULT_DATASET_EXTENSIONS: frozenset[str] = frozenset({
+    "npy", "npz", "pt", "pth", "ckpt", "safetensors", "onnx", "pb",
+    "h5", "hdf5", "tfrecord", "mat", "pkl", "pickle", "bin",
+    "parquet", "arrow", "feather",
+    "png", "jpg", "jpeg", "bmp", "gif", "tiff", "tif", "webp",
+    "wav", "flac", "mp3", "ogg", "mp4", "mov", "avi", "mkv",
+    "ply", "pcd",
+})
 
 # Known assistants the setup selector offers. `binary` is what we probe for on
 # PATH; `command` is written into config.yaml. Order is the menu order.
@@ -118,6 +131,10 @@ class IndexConfig:
 
     store_body: bool = DEFAULT_STORE_BODY
     diagrams: bool = DEFAULT_DIAGRAMS
+    dataset_threshold: int = DEFAULT_DATASET_THRESHOLD
+    dataset_ext_threshold: int = DEFAULT_DATASET_EXT_THRESHOLD
+    dataset_extensions: list[str] = field(default_factory=list)
+    body_max_bytes: int = DEFAULT_BODY_MAX_BYTES
 
 
 @dataclass
@@ -165,6 +182,16 @@ class Config:
         index = IndexConfig(
             store_body=_bool_config(index_raw.get("store_body"), DEFAULT_STORE_BODY),
             diagrams=_bool_config(index_raw.get("diagrams"), DEFAULT_DIAGRAMS),
+            dataset_threshold=_int_config(
+                index_raw.get("dataset_threshold"), DEFAULT_DATASET_THRESHOLD
+            ),
+            dataset_ext_threshold=_int_config(
+                index_raw.get("dataset_ext_threshold"), DEFAULT_DATASET_EXT_THRESHOLD
+            ),
+            dataset_extensions=_str_list_config(index_raw.get("dataset_extensions")),
+            body_max_bytes=_int_config(
+                index_raw.get("body_max_bytes"), DEFAULT_BODY_MAX_BYTES
+            ),
         )
         return cls(
             ai=ai,
@@ -211,6 +238,10 @@ def _ensure_config_shape(data: dict) -> dict:
         data["index"] = {}
     data["index"].setdefault("store_body", DEFAULT_STORE_BODY)
     data["index"].setdefault("diagrams", DEFAULT_DIAGRAMS)
+    data["index"].setdefault("dataset_threshold", DEFAULT_DATASET_THRESHOLD)
+    data["index"].setdefault("dataset_ext_threshold", DEFAULT_DATASET_EXT_THRESHOLD)
+    data["index"].setdefault("dataset_extensions", [])
+    data["index"].setdefault("body_max_bytes", DEFAULT_BODY_MAX_BYTES)
     data.setdefault("embed", _default_embed_config())
     if not isinstance(data.get("embed"), dict):
         data["embed"] = _default_embed_config()
@@ -271,6 +302,10 @@ def write_config(
         "  # Generate Mermaid link diagrams during `quack reindex` when folder\n"
         "  # indexes changed. Use `quack reindex --no-diagrams` to skip once.\n"
         f"  diagrams: {'true' if DEFAULT_DIAGRAMS else 'false'}\n"
+        f"  dataset_threshold: {DEFAULT_DATASET_THRESHOLD}\n"
+        f"  dataset_ext_threshold: {DEFAULT_DATASET_EXT_THRESHOLD}\n"
+        "  dataset_extensions: []  # extra extensions that count toward dataset_ext_threshold\n"
+        f"  body_max_bytes: {DEFAULT_BODY_MAX_BYTES}  # max bytes read from each file for FTS body\n"
         "\n"
         "embed:\n"
         "  # Free local default. Run `quack embed init` to choose Ollama or\n"
@@ -339,6 +374,25 @@ def _bool_config(value, default: bool) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return bool(value)
+
+
+def _int_config(value, default: int) -> int:
+    """Coerce a config value to a non-negative int, falling back to *default*
+    when it is missing or unparseable (a bad value should never crash a load)."""
+    if value is None:
+        return default
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return n if n >= 0 else default
+
+
+def _str_list_config(value) -> list[str]:
+    """Coerce a config value to a list of strings, ignoring bad entries."""
+    if not isinstance(value, list):
+        return []
+    return [str(v).lstrip(".").lower() for v in value if v]
 
 
 def _yaml_scalar(value: str) -> str:

@@ -49,7 +49,8 @@ my-workspace/               <- the Quack Space root
 │   ├── config.yaml         your AI assistant choice
 │   ├── map.yaml            GENERATED: folder tree with descriptions
 │   └── quack.duckdb        GENERATED: full catalog (files, tags, links, FTS, embeddings)
-├── .quackignore            optional extra ignore patterns
+├── .quackignore            optional extra ignore patterns (dependency trees and
+│                           large datasets are skipped automatically — see below)
 ├── QUACK.md                navigation anchor for LLMs (generated)
 ├── notes/  docs/  src/ ...   your actual files
 │   └── .index.yaml         EDITABLE: descriptions + tags for this folder's children
@@ -100,6 +101,25 @@ files are preserved unless you pass an explicit flag.
 Interactive `quack clean` shows a small menu for cleanup scope. In scripts, it
 keeps the default safe behavior and removes only derived artifacts unless you
 pass flags like `--diagrams`, `--catalog --map`, or `--all`.
+
+## What gets indexed
+
+`reindex` walks the whole root, but skips three kinds of noise so the catalog
+stays about your actual work:
+
+- **`.quackignore`** (root) — one pattern per line, matched against each
+  file/dir name **and** its root-relative path (globs via fnmatch, e.g.
+  `*.lock`). Use it for build outputs and scratch dirs.
+- **Dependency trees** — `node_modules`, `site-packages`, `.venv`, `.tox`, … are
+  recorded as folders (so an agent knows they exist) but never descended into.
+  Caches (`__pycache__`, `.mypy_cache`, …) and `.git`/`.quack` are hidden
+  entirely. No config needed.
+- **Datasets (by size, not name)** — a folder with more files than
+  `index.dataset_threshold` (default 10000, any type), or more than
+  `index.dataset_ext_threshold` (default 500) files of one bulk-data type
+  (`.npy`, `.png`, tensors, parquet…), is recorded and tagged `dataset` but its
+  files aren't indexed one by one — so a 200k-file data dump can't drown the
+  catalog. Set either to `0` in `.quack/config.yaml` to disable.
 
 ## The catalog
 

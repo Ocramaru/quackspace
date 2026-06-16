@@ -377,6 +377,7 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
         # One transaction for all writes (see build(): per-statement commits are
         # ~8x slower than batching them).
         con.execute("BEGIN TRANSACTION")
+        tag_rows: list[tuple[str, str]] = []
         for e in space.entries:
             current = (
                 ",".join(e.tags),
@@ -390,11 +391,11 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
                     "file_modified = ?, embed_source_hash = ?, stale = ? WHERE rel = ?",
                     [current[0], e.described_at, e.modified, current[3], e.stale, e.rel],
                 )
+            tag_rows.extend((e.name, tag) for tag in e.tags)
 
         # tags and folders aren't full-text indexed, so rebuilding them wholesale
         # is cheap and keeps the code simple.
         con.execute("DELETE FROM tags;")
-        tag_rows = [(e.name, tag) for e in space.entries for tag in e.tags]
         _insert_rows(con, "tags", tag_rows)
 
         con.execute("DELETE FROM folders;")

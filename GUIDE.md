@@ -63,11 +63,17 @@ entire graph to find a few neighbours. Read cost scales with *relevance*.
   → that folder's `.folder.md` frontmatter → folder recognition default → blank.
   Author one by editing the parent's `directories:` section, or over MCP call
   `describe` then `reindex`.
-- Ignore patterns live in `.quackignore` at the root. Built-ins are automatic:
-  `.quack`/`.git`/`.obsidian`/`.trash` and caches (`__pycache__`, `.mypy_cache`,
-  …) are hidden entirely; vendored/dependency trees (`site-packages`,
-  `node_modules`, `.venv`, `.tox`, …) are **mentioned** as folders but their
-  contents are not indexed.
+- Ignore patterns live in `.quackignore` at the root: one pattern per line,
+  matched against each file/dir name **and** its root-relative path (globs via
+  fnmatch, e.g. `*.lock`). Built-ins are automatic: `.quack`/`.git`/`.obsidian`/
+  `.trash` and caches (`__pycache__`, `.mypy_cache`, …) are hidden entirely;
+  vendored/dependency trees (`site-packages`, `node_modules`, `.venv`, `.tox`,
+  …) are **mentioned** as folders but their contents are not indexed.
+- Datasets are detected by size, not name: a folder with more files than
+  `index.dataset_threshold` (any type), or more than `index.dataset_ext_threshold`
+  files of one bulk-data type (`.npy`, `.png`, tensors…), is recorded and tagged
+  `dataset` but its files aren't indexed — so a 200k-file data dump can't drown
+  the catalog. Tune or disable (set `0`) both in `.quack/config.yaml`.
 - Author metadata by editing a folder's `.index.yaml`, or let the assistant
   classify it: `quack generate` writes a description + tags for every file
   missing one (`--stale` also refreshes ones whose file changed since).

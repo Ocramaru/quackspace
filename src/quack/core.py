@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
@@ -42,6 +43,52 @@ DEFAULT_OPAQUE_DIRS = {
     "site-packages", "node_modules", "bower_components",
     ".venv", "venv", "virtualenv", ".tox", ".eggs",
 }
+
+@dataclass(frozen=True)
+class DatasetPolicy:
+    """Thresholds that mark a folder as a dataset (recorded but not indexed).
+    A value of 0 disables that trigger; the default disables both."""
+
+    total: int = 0
+    per_ext: int = 0
+    extensions: frozenset[str] = frozenset()
+
+    @property
+    def active(self) -> bool:
+        return self.total > 0 or self.per_ext > 0
+
+
+def _dataset_reason(
+    n_files: int, ext_counts: "Counter[str] | None", policy: DatasetPolicy
+) -> str:
+    if policy.total and n_files > policy.total:
+        return f"{n_files} files"
+    if ext_counts is not None and policy.per_ext:
+        # Most-common first so the reason names the dominant data type.
+        for ext, c in ext_counts.most_common():
+            if ext in policy.extensions and c > policy.per_ext:
+                return f"{c} .{ext} files"
+    return ""
+
+
+def _filter_dir(
+    base: Path,
+    filenames: list[str],
+    root: Path,
+    patterns: set[str],
+    policy: DatasetPolicy,
+) -> tuple[list[str], str]:
+    kept: list[str] = []
+    ext_counts: "Counter[str] | None" = Counter() if policy.per_ext else None
+    for fn in filenames:
+        rel = (base / fn).relative_to(root).as_posix()
+        if not _keep_file(fn, rel, patterns):
+            continue
+        kept.append(fn)
+        if ext_counts is not None:
+            ext_counts[Path(fn).suffix.lower().lstrip(".")] += 1
+    return kept, _dataset_reason(len(kept), ext_counts, policy)
+
 
 # quack's own generated/meta files that live alongside content but are not
 # content themselves, so they are never indexed as files.
@@ -206,16 +253,13 @@ def _mtime_iso(path: Path) -> str:
     return datetime.fromtimestamp(ts).isoformat(timespec="seconds")
 
 
-def _read_text(path: Path) -> tuple[str, bool]:
-    """Return (body, is_binary). Files containing NUL bytes are treated as
-    binary and yield an empty body. Only the first TEXT_BODY_MAX_BYTES are read
-    (not the whole file, then truncated) so a huge log/asset doesn't slow the
-    scan. Content that isn't valid UTF-8 but has no NUL bytes is almost
-    certainly text in a legacy encoding (e.g. Windows-1252 smart quotes), so it
-    is decoded leniently rather than dropped or raised."""
+def _read_text(path: Path, max_bytes: int = TEXT_BODY_MAX_BYTES) -> tuple[str, bool]:
+    """Return (body, is_binary). NUL bytes → binary (empty body). Reads at most
+    *max_bytes* so large files don't stall the scan. Non-UTF-8 text is decoded
+    leniently rather than dropped."""
     try:
         with path.open("rb") as f:
-            chunk = f.read(TEXT_BODY_MAX_BYTES)
+            chunk = f.read(max_bytes)
     except OSError:
         return "", False
     if b"\x00" in chunk[:1024]:
@@ -352,13 +396,10 @@ def parse_frontmatter(text: str) -> "frontmatter.Post":
         return frontmatter.Post(content=text)
 
 
-def load_entry(path: Path, root: Path) -> Entry:
-    """Load one file. Markdown is parsed for an optional frontmatter seed; any
-    other file is read as text. Reads go through ``_read_text`` so a markdown
-    file in a legacy encoding (or an undecodable/binary one) degrades instead of
-    raising — ``frontmatter`` is only handed already-decoded text, and malformed
-    YAML frontmatter is tolerated (see ``parse_frontmatter``)."""
-    body, is_binary = _read_text(path)
+def load_entry(path: Path, root: Path, body_max_bytes: int = TEXT_BODY_MAX_BYTES) -> Entry:
+    """Load one file. Markdown is parsed for frontmatter; any other file is read
+    as text. Non-UTF-8 and binary files degrade gracefully."""
+    body, is_binary = _read_text(path, body_max_bytes)
     if not is_binary and path.suffix.lower() == ".md":
         post = parse_frontmatter(body)
         return Entry(path=path, root=root, body=post.content, _fm=post)
@@ -394,15 +435,12 @@ def _load_entries(
     file_paths: list[Path],
     root: Path,
     on_file: "Callable[[Entry], None] | None",
+    body_max_bytes: int = TEXT_BODY_MAX_BYTES,
 ) -> list[Entry]:
-    """Load entries from *file_paths*. Reading file bodies is I/O-bound (the GIL
-    is released during reads), so for many files we load them on a thread pool;
-    ``ThreadPoolExecutor.map`` preserves order, so ``on_file`` still fires in a
-    stable sequence for progress reporting."""
     if len(file_paths) < _PARALLEL_MIN_FILES:
         entries: list[Entry] = []
         for p in file_paths:
-            e = load_entry(p, root)
+            e = load_entry(p, root, body_max_bytes)
             entries.append(e)
             if on_file is not None:
                 on_file(e)
@@ -410,11 +448,9 @@ def _load_entries(
 
     from concurrent.futures import ThreadPoolExecutor
 
-    # No max_workers: ThreadPoolExecutor sizes the pool from the machine
-    # (min(32, os.cpu_count() + 4)), so we don't hand-roll resource decisions.
     entries = []
     with ThreadPoolExecutor() as pool:
-        for e in pool.map(lambda p: load_entry(p, root), file_paths):
+        for e in pool.map(lambda p: load_entry(p, root, body_max_bytes), file_paths):
             entries.append(e)
             if on_file is not None:
                 on_file(e)
@@ -425,6 +461,9 @@ def walk(
     root: Path,
     ignores: "IgnoreRuleset | None" = None,
     on_file: "Callable[[Entry], None] | None" = None,
+    dataset_policy: DatasetPolicy | None = None,
+    datasets_out: dict[str, str] | None = None,
+    body_max_bytes: int = TEXT_BODY_MAX_BYTES,
 ) -> tuple[list[Entry], list[Path]]:
     """One filesystem pass → (entries, folders).
 
@@ -433,8 +472,15 @@ def walk(
     (excluding root itself), including folders that contain only subfolders, so
     the per-folder meta layer can cover the whole tree. Directory traversal is a
     single ``os.walk``; the (slower, I/O-bound) file loading is parallelized.
-    *on_file*, if given, is called with each loaded entry (drives progress)."""
+    *on_file*, if given, is called with each loaded entry (drives progress).
+
+    *dataset_policy*, when active, makes a folder whose files look like a dataset
+    (see :class:`DatasetPolicy`) *recorded but not indexed*: it stays in
+    ``folders`` so the meta layer knows it exists, but its files are skipped (not
+    loaded, not returned in ``entries``). If *datasets_out* is given, each such
+    folder's rel maps to a short reason string for the meta layer to describe."""
     patterns = ignores if ignores is not None else load_ignores(root)
+    policy = dataset_policy or DatasetPolicy()
     file_paths: list[Path] = []
     folders: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -442,24 +488,30 @@ def walk(
         record, descend = _level(base, dirnames, root, patterns)
         folders.extend(record)
         dirnames[:] = descend
-        for fn in filenames:
-            rel = (base / fn).relative_to(root).as_posix()
-            if _keep_file(fn, rel, patterns):
-                file_paths.append(base / fn)
-    entries = _load_entries(file_paths, root, on_file)
+        kept, reason = _filter_dir(base, filenames, root, patterns, policy)
+        if reason:
+            if datasets_out is not None:
+                rel = base.relative_to(root).as_posix()
+                datasets_out["" if rel == "." else rel] = reason
+            continue
+        file_paths.extend(base / fn for fn in kept)
+    entries = _load_entries(file_paths, root, on_file, body_max_bytes)
     return entries, folders
 
 
 def count_indexable(
     root: Path,
     ignores: "IgnoreRuleset | None" = None,
+    dataset_policy: DatasetPolicy | None = None,
     progress: "Callable[[int, int | None, str], None] | None" = None,
 ) -> int:
     """Count the files :func:`walk` would index, without reading any of them.
     Cheap (stat/scandir only); used to get a total up front for later progress.
-    When *progress* is supplied, reports an unbounded counter rather than a
-    percentage bar because the total is exactly what this pass is discovering."""
+    Applies the same *dataset_policy* skip as :func:`walk` so the total matches
+    what is actually indexed. When *progress* is supplied, reports an unbounded
+    counter because the total is exactly what this pass is discovering."""
     patterns = ignores if ignores is not None else load_ignores(root)
+    policy = dataset_policy or DatasetPolicy()
     n = 0
     if progress is not None:
         progress(0, None, "Waddling through files: 0")
@@ -467,12 +519,12 @@ def count_indexable(
         base = Path(dirpath)
         _record, descend = _level(base, dirnames, root, patterns)
         dirnames[:] = descend
-        for fn in filenames:
-            rel = (base / fn).relative_to(root).as_posix()
-            if _keep_file(fn, rel, patterns):
-                n += 1
-                if progress is not None and n % 100 == 0:
-                    progress(n, None, f"Waddling through files: {n:,}")
+        kept, reason = _filter_dir(base, filenames, root, patterns, policy)
+        if reason:
+            continue
+        n += len(kept)
+        if progress is not None and n % 100 == 0:
+            progress(n, None, f"Waddling through files: {n:,}")
     if progress is not None:
         progress(n, None, f"Waddled {n:,} file(s)")
     return n
@@ -486,6 +538,7 @@ _META_MARKERS = (".index.yaml", ".folder.md")
 def scan_signature(
     root: Path,
     ignores: "IgnoreRuleset | None" = None,
+    dataset_policy: DatasetPolicy | None = None,
     progress: "Callable[[int, int, str], None] | None" = None,
 ) -> tuple[dict[str, str], set[str], int]:
     """Stat-only change signature — no file reads, no parsing.
@@ -496,9 +549,12 @@ def scan_signature(
     ``st_mtime_ns`` among ``.index.yaml``/``.folder.md`` (0 if none) — nanosecond
     precision so an authored edit made in the same second as a build is still
     seen. Used for a cheap reindex no-op check before paying for a full
-    :func:`walk`."""
+    :func:`walk`. Applies the same *dataset_policy* skip as :func:`walk`, so the
+    signature reflects exactly the files the catalog holds (else a dataset folder
+    would make every reindex look dirty)."""
     patterns = ignores if ignores is not None else load_ignores(root)
-    total = count_indexable(root, patterns, progress=progress) if progress is not None else 0
+    policy = dataset_policy or DatasetPolicy()
+    total = count_indexable(root, patterns, policy, progress=progress) if progress is not None else 0
     seen = 0
     if progress is not None:
         progress(0, max(total, 1), "Checking files")
@@ -511,6 +567,8 @@ def scan_signature(
         for d in record:
             folders.add(d.relative_to(root).as_posix())
         dirnames[:] = descend
+        kept: list[tuple[str, Path]] = []
+        ext_counts: "Counter[str] | None" = Counter() if policy.per_ext else None
         for fn in filenames:
             full = base / fn
             if fn in _META_MARKERS:
@@ -523,10 +581,16 @@ def scan_signature(
                 continue
             rel = full.relative_to(root).as_posix()
             if _keep_file(fn, rel, patterns):
-                seen += 1
-                files[rel] = _mtime_iso(full)
-                if progress is not None and (seen == total or seen % 100 == 0):
-                    progress(seen, max(total, 1), f"Checking {rel}")
+                kept.append((rel, full))
+                if ext_counts is not None:
+                    ext_counts[Path(fn).suffix.lower().lstrip(".")] += 1
+        if _dataset_reason(len(kept), ext_counts, policy):
+            continue
+        for rel, full in kept:
+            seen += 1
+            files[rel] = _mtime_iso(full)
+            if progress is not None and (seen == total or seen % 100 == 0):
+                progress(seen, max(total, 1), f"Checking {rel}")
     if progress is not None and seen == 0:
         progress(1, 1, "Checked files")
     return files, folders, newest_marker_ns
@@ -551,9 +615,10 @@ class Space:
 
     root: Path
     entries: list[Entry] = field(default_factory=list)
-    # Every non-ignored folder under root (excluding root), from the same walk
-    # that produced ``entries`` — so consumers never re-traverse the tree.
+    # Same walk as ``entries``; consumers never re-traverse the tree.
     folders: list[Path] = field(default_factory=list)
+    # rel → reason for folders skipped as datasets; files not in ``entries``.
+    datasets: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def load(
@@ -565,10 +630,20 @@ class Space:
         called as ``progress(done, total, message)`` per file during the scan —
         it triggers a cheap up-front count so a real total is known. Callers
         that don't need progress (search, embed, doctor) pay no extra walk."""
+        from .config import Config  # local import avoids a config<->core cycle
+
         root = find_root(explicit)
+        index_cfg = Config.load(str(root)).index
+        from .config import DEFAULT_DATASET_EXTENSIONS
+        policy = DatasetPolicy(
+            total=index_cfg.dataset_threshold,
+            per_ext=index_cfg.dataset_ext_threshold,
+            extensions=DEFAULT_DATASET_EXTENSIONS | frozenset(index_cfg.dataset_extensions),
+        )
+        body_max_bytes = index_cfg.body_max_bytes
         on_file = None
         if progress is not None:
-            total = count_indexable(root, progress=progress)
+            total = count_indexable(root, dataset_policy=policy, progress=progress)
             seen = {"n": 0}
 
             def on_file(entry: Entry) -> None:
@@ -577,13 +652,17 @@ class Space:
 
         if progress is not None:
             progress(0, 1, "Loading file contents")
-        entries, folders = walk(root, on_file=on_file)
+        datasets: dict[str, str] = {}
+        entries, folders = walk(
+            root, on_file=on_file, dataset_policy=policy, datasets_out=datasets,
+            body_max_bytes=body_max_bytes,
+        )
         if progress is not None:
             progress(0, 1, "Applying metadata")
         _overlay(root, entries)
         if progress is not None:
             progress(1, 1, "Applied metadata")
-        return cls(root=root, entries=entries, folders=folders)
+        return cls(root=root, entries=entries, folders=folders, datasets=datasets)
 
     @cached_property
     def by_name(self) -> dict[str, Entry]:

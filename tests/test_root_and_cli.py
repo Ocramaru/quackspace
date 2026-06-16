@@ -399,7 +399,14 @@ def test_write_config_preserves_existing_defaults(tmp_path):
         "sql_row_limit": 5,
         "central_limit": 6,
     }
-    assert data["index"] == {"store_body": False, "diagrams": True}
+    assert data["index"] == {
+        "store_body": False,
+        "diagrams": True,
+        "dataset_threshold": 10000,
+        "dataset_ext_threshold": 500,
+        "dataset_extensions": [],
+        "body_max_bytes": 1_000_000,
+    }
 
 
 def test_config_loads_index_body_storage(tmp_path):

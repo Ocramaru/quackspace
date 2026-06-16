@@ -102,6 +102,16 @@ def _build_info(space: Space, rel: str, files: list) -> FolderInfo:
             space, rel, name, parent, folder_path
         )
 
+    # A folder skipped as a dataset (its files aren't indexed) is still recorded
+    # here, marked so an agent knows what it is: a derived description when none
+    # was authored, plus a `dataset` tag for filtering. n_files stays 0 because
+    # no file rows exist — the reason string carries the real magnitude.
+    if not is_root and rel in space.datasets:
+        if not desc:
+            desc = f"Dataset: {space.datasets[rel]}, not indexed."
+        if "dataset" not in tags:
+            tags = ["dataset", *tags]
+
     types: dict[str, int] = defaultdict(int)
     tag_counts: Counter = Counter()
     for e in files:
