@@ -63,7 +63,11 @@ my-workspace/               <- the Quack Space root
 ## Commands
 
 ```bash
-quack init [dir]            # create & scaffold a new space
+quack init [dir]            # create & scaffold a new space, then index it
+quack init --no-reindex     # scaffold only; tune .quackignore before indexing
+quack init --no-gitignore   # scaffold without writing quack-managed .gitignore rules
+quack init --no-diagrams    # scaffold with diagram generation turned off in config
+quack init --dry-run        # show what init would write without changing files
 quack reindex               # rebuild everything (catalog, map, diagrams)
 quack search "terms"        # auto-hybrid: keyword + FTS + semantic + graph
 quack search "terms" --fts  # force BM25 full-text ranking
@@ -75,12 +79,18 @@ quack generate --stale      # also refresh stale ones
 quack embed                 # build semantic embeddings
 quack new "Title" -f folder -d "..." -t tag,tag   # new markdown note
 quack doctor                # check links, descriptions, MCP registration
+quack clean --dry-run       # show generated artifacts clean would remove
 quack setup                 # choose an AI assistant
 quack mcp install           # register the MCP server with Claude Code / Kiro
 quack where                 # show workspace, state, package, and command paths
 ```
 
 Root resolution order: `--root` → walk up for `.quack/` → `$QUACK_ROOT` → `$OBSIDIAN_VAULT`. If none resolves to a directory containing `.quack/`, the command tells you to run `quack init` or pass `--root`.
+
+Fresh interactive `quack init` asks a couple setup questions before it writes:
+whether quack should manage generated-file `.gitignore` rules, and whether
+future `quack reindex` runs should generate Mermaid diagrams. Existing
+`.quack/config.yaml` files are preserved unless you pass an explicit flag.
 
 ## The catalog
 
@@ -94,6 +104,9 @@ Root resolution order: `--root` → walk up for `.quack/` → `$QUACK_ROOT` → 
   `index.store_body: false` in `.quack/config.yaml` and run `quack reindex` to
   leave `files.body` empty and limit catalog full-text search to
   names/descriptions.
+- **Diagrams** are generated during `quack reindex` by default when folder
+  indexes change. Set `index.diagrams: false` in `.quack/config.yaml`, or run
+  `quack reindex --no-diagrams` to skip them once.
 - **`embeddings` / `folder_embeddings`**: separate vector spaces after `quack embed`
 
 ```bash

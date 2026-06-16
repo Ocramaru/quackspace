@@ -81,6 +81,31 @@ def test_clean_derived_via_cli(tmp_path):
     assert (root / ".quack" / "config.yaml").exists()
 
 
+def test_clean_dry_run_reports_without_removing(tmp_path, capsys):
+    root = _space(tmp_path)
+
+    assert main(["clean", "--dry-run", "--root", str(root)]) == 0
+
+    out = capsys.readouterr().out
+    assert "would clean derived artifacts" in out
+    assert (root / ".quack" / "quack.duckdb").exists()
+    assert (root / ".quack" / "map.yaml").exists()
+    assert (root / ".quack" / "diagram.md").exists()
+    assert (root / "notes" / "_diagrams.md").exists()
+
+
+def test_clean_all_dry_run_does_not_require_yes_or_remove(tmp_path, capsys):
+    root = _space(tmp_path)
+
+    assert main(["clean", "--all", "--dry-run", "--root", str(root)]) == 0
+
+    out = capsys.readouterr().out
+    assert "would uninstall quack" in out
+    assert (root / ".quack").exists()
+    assert (root / "QUACK.md").exists()
+    assert (root / "notes" / ".index.yaml").exists()
+
+
 def test_clean_all_removes_mcp_registration(tmp_path):
     from quack import mcp_install
 

@@ -110,6 +110,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument(
         "--yes", action="store_true", help="skip the confirmation prompt for --all"
     )
+    p_clean.add_argument(
+        "--dry-run", action="store_true", help="show what would be removed without deleting anything"
+    )
 
     p_doctor = sub.add_parser("doctor", help="health-check the root (files + MCP)")
     _add_root_arg(p_doctor)
@@ -153,6 +156,26 @@ def build_parser() -> argparse.ArgumentParser:
     _add_root_arg(p_init)
     p_init.add_argument(
         "dir", nargs="?", default=None, help="target directory (created if missing; default: current)"
+    )
+    p_init.add_argument(
+        "--no-reindex",
+        action="store_true",
+        help="skip the first reindex so you can tune .quackignore before indexing",
+    )
+    p_init.add_argument(
+        "--no-gitignore",
+        action="store_true",
+        help="do not write or update quack-managed .gitignore files",
+    )
+    p_init.add_argument(
+        "--no-diagrams",
+        action="store_true",
+        help="turn off diagram generation in this workspace config",
+    )
+    p_init.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show what would be scaffolded without writing anything",
     )
 
     p_gen = sub.add_parser(
@@ -415,6 +438,17 @@ def _offer_setup(space_arg) -> bool:
     return result.configured
 
 
+def _ask_yes_no(prompt: str, default: bool = True) -> bool:
+    suffix = " [Y/n] " if default else " [y/N] "
+    try:
+        answer = input(prompt + suffix).strip().lower()
+    except EOFError:
+        return default
+    if not answer:
+        return default
+    return answer in ("y", "yes")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point: dispatch, turning expected failures into clean messages
     instead of tracebacks."""
@@ -464,23 +498,29 @@ def _dispatch(argv: list[str] | None) -> int:
     if args.command == "reindex":
         from ._duck import swimming
 
+        config = Config.load(args.root)
+        generate_diagrams = config.index.diagrams and not args.no_diagrams
         with swimming("Reindexing") as progress:
             summary = reindex(args.root, progress=progress.update)
-            if not args.no_diagrams and summary["folder_indexes"]:
+            if generate_diagrams and summary["folder_indexes"]:
                 progress.update(message="Generating diagrams")
                 d = diagram(args.root, progress=progress.update)
             else:
                 d = None
         print(
-            f"✓ reindexed {summary['files']} files across "
-            f"{summary['folder_indexes']} folder(s)\n"
+            f"✓ reindexed {summary['files']:,} files across "
+            f"{summary['folder_indexes']:,} folder(s)\n"
             f"  map:     {summary['map']}\n"
             f"  catalog: {summary['db']}"
         )
         if d is not None:
             print(f"  diagrams: {d['folder_diagrams']} folder(s) + {d['global']}")
-        elif not args.no_diagrams:
+        elif generate_diagrams:
             print("  diagrams: skipped (no folder indexes changed)")
+        elif args.no_diagrams:
+            print("  diagrams: skipped (--no-diagrams)")
+        else:
+            print("  diagrams: skipped (index.diagrams: false)")
         return 0
 
     if args.command == "diagram":
@@ -494,7 +534,7 @@ def _dispatch(argv: list[str] | None) -> int:
     if args.command == "clean":
         from .clean import clean
 
-        if args.purge and not args.yes:
+        if args.purge and not args.yes and not args.dry_run:
             print(
                 "✗ `quack clean --all` fully uninstalls quack and DELETES authored\n"
                 "  .index.yaml descriptions, QUACK.md, and .quack/. This cannot be\n"
@@ -502,20 +542,24 @@ def _dispatch(argv: list[str] | None) -> int:
                 file=sys.stderr,
             )
             return 1
-        removed = clean(args.root, purge=args.purge)
+        removed = clean(args.root, purge=args.purge, dry_run=args.dry_run)
         if args.purge:
+            verb = "would uninstall" if args.dry_run else "uninstalled"
+            detail = "would remove" if args.dry_run else "removed"
             print(
-                f"✓ uninstalled quack: removed {removed['indexes']} index file(s), "
-                f"{removed['diagrams']} diagram(s), and the .quack/ layer"
+                f"✓ {verb} quack: {detail} {removed['indexes']:,} index file(s), "
+                f"{removed['diagrams']:,} diagram(s), and the .quack/ layer"
             )
         else:
+            verb = "would clean" if args.dry_run else "cleaned"
             print(
-                f"✓ cleaned derived artifacts: catalog, map, "
-                f"{removed['diagrams']} diagram(s). Run `quack reindex` to rebuild."
+                f"✓ {verb} derived artifacts: catalog, map, "
+                f"{removed['diagrams']:,} diagram(s). Run `quack reindex` to rebuild."
             )
         if removed.get("extras"):
+            verb = "would also remove" if args.dry_run else "also removed"
             print(
-                f"  (also removed {removed['extras']} stray artifact(s) found by scan "
+                f"  ({verb} {removed['extras']:,} stray artifact(s) found by scan "
                 "that the catalog didn't list)"
             )
         return 0
@@ -689,21 +733,89 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command == "init":
         from ._duck import swimming
-        from .scaffold import scaffold_root
+        from .scaffold import preview_scaffold, scaffold_root, update_init_config
 
         gitignore_summaries = []
+        target = args.dir or args.root
+        target_root = Path(target).expanduser().resolve() if target else Path.cwd().resolve()
+        config_path = target_root / ".quack" / "config.yaml"
+        config_existed = config_path.exists()
+        manage_gitignore = not args.no_gitignore
+        diagrams_enabled = not args.no_diagrams
+        if config_existed:
+            config = Config.load(str(target_root))
+            diagrams_enabled = config.index.diagrams and not args.no_diagrams
+        elif not args.dry_run and sys.stdin.isatty():
+            if not args.no_gitignore:
+                manage_gitignore = _ask_yes_no(
+                    "Add quack's generated files to .gitignore files?",
+                    default=True,
+                )
+            if not args.no_diagrams:
+                diagrams_enabled = _ask_yes_no(
+                    "Generate Mermaid diagrams during reindex?",
+                    default=True,
+                )
+        if args.dry_run:
+            print("Would scaffold quack space:")
+            for path in preview_scaffold(str(target_root), manage_gitignore=manage_gitignore):
+                print(f"  {path}")
+            if config_existed:
+                print(f"  config: exists, would preserve {config_path}")
+            if args.no_gitignore:
+                print("  gitignore: skipped (--no-gitignore)")
+            if args.no_reindex:
+                print("  reindex: skipped (--no-reindex)")
+            else:
+                print("  reindex: would run")
+            return 0
         with swimming("Scaffolding", total=5) as progress:
             root = scaffold_root(
                 args.dir or args.root,
                 progress=progress.update,
                 gitignore_summary=gitignore_summaries,
+                manage_gitignore=manage_gitignore,
             )
+        if config_existed:
+            print(f"  config: preserved existing {config_path}")
+            if args.no_gitignore or args.no_diagrams:
+                update_init_config(
+                    root / ".quack" / "config.yaml",
+                    gitignore=False if args.no_gitignore else None,
+                    diagrams=False if args.no_diagrams else None,
+                )
+            if args.no_gitignore:
+                print("  gitignore: turned off in config")
+            if args.no_diagrams:
+                print("  diagrams: turned off in config")
+        else:
+            update_init_config(
+                root / ".quack" / "config.yaml",
+                gitignore=manage_gitignore,
+                diagrams=diagrams_enabled,
+            )
+            if not diagrams_enabled:
+                print("  diagrams: turned off in config")
         print(f"✓ scaffolded space at {root}")
         if gitignore_summaries:
             print(f"  {gitignore_summaries[-1].format(root)}")
-        with swimming("Reindexing") as progress:
-            summary = reindex(str(root), progress=progress.update)
-        print(f"  reindexed {summary['files']} file(s)")
+        elif args.no_gitignore:
+            print("  gitignore: skipped (--no-gitignore)")
+        if args.no_reindex:
+            print("  reindex: skipped (--no-reindex)")
+        else:
+            with swimming("Reindexing") as progress:
+                summary = reindex(str(root), progress=progress.update)
+                if diagrams_enabled and summary.get("folder_indexes", 0):
+                    progress.update(message="Generating diagrams")
+                    d = diagram(str(root), progress=progress.update)
+                else:
+                    d = None
+            print(f"✓ reindexed {summary['files']:,} file(s)")
+            if d is not None:
+                print(f"  diagrams: {d['folder_diagrams']:,} folder(s) + {d['global']}")
+            elif not diagrams_enabled:
+                print("  diagrams: skipped (index.diagrams: false)")
         print("\nChoose an assistant to auto-write descriptions (optional):\n")
         run_setup(str(root))
         print("\nNext: `cd` in and run `quack mcp install` to connect an LLM.")

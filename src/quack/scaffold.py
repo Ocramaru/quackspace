@@ -11,7 +11,7 @@ import frontmatter
 import yaml
 
 from .core import MARKER_DIR, find_root
-from .gitignore import GitignoreSummary
+from .gitignore import GitignoreSummary, preview_gitignore
 
 TEMPLATE_KEYS = ("description", "tags", "created", "updated")
 
@@ -134,10 +134,53 @@ def _merge_defaults(config_path: Path, defaults: dict | None) -> None:
     config_path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
 
+def update_init_config(
+    config_path: Path,
+    *,
+    gitignore: bool | None = None,
+    diagrams: bool | None = None,
+) -> None:
+    """Update init-time workspace choices without disturbing other config."""
+    try:
+        data = yaml.safe_load(config_path.read_text()) or {}
+    except yaml.YAMLError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    if gitignore is not None:
+        data["gitignore"] = gitignore
+    if diagrams is not None:
+        index = data.get("index")
+        if not isinstance(index, dict):
+            index = {}
+        index["diagrams"] = diagrams
+        data["index"] = index
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+
+
+def preview_scaffold(target: str | None = None, manage_gitignore: bool = True) -> list[str]:
+    """Human-readable write plan for ``quack init --dry-run``."""
+    root = Path(target).expanduser().resolve() if target else Path.cwd().resolve()
+    is_new = not root.exists() or not any(root.iterdir())
+    paths = [
+        root / ".quack",
+        root / "QUACK.md",
+        root / ".quackignore",
+        root / ".quack" / "config.yaml",
+    ]
+    if is_new:
+        paths.extend(root / folder for folder in STARTER_FOLDERS)
+    if manage_gitignore:
+        summary = preview_gitignore(root)
+        paths.extend(summary.updated)
+    return [str(path) for path in dict.fromkeys(paths)]
+
+
 def scaffold_root(
     target: str | None = None,
     progress: Callable[[int, int, str], None] | None = None,
     gitignore_summary: list[GitignoreSummary] | None = None,
+    manage_gitignore: bool = True,
 ) -> Path:
     """Turn a directory into a quack root, creating it if needed. Writes only
     what is missing, so it is safe to re-run on an existing space.
@@ -174,13 +217,18 @@ def scaffold_root(
         inherited = _inherited_defaults(root)
         write_config(command="", explicit_root=str(root))
         _merge_defaults(cfg, inherited)
+    if not manage_gitignore:
+        update_init_config(cfg, gitignore=False)
 
     from .gitignore import ensure_gitignore
 
-    report(3, "Managing gitignore")
-    summary = ensure_gitignore(root, progress=progress)
-    if gitignore_summary is not None:
-        gitignore_summary.append(summary)
+    if manage_gitignore:
+        report(3, "Managing gitignore")
+        summary = ensure_gitignore(root, progress=progress)
+        if gitignore_summary is not None:
+            gitignore_summary.append(summary)
+    else:
+        report(3, "Skipping gitignore management")
     report(5, "Scaffolded space")
     return root
 

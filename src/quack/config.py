@@ -35,6 +35,7 @@ DEFAULT_FILE_CHAR_LIMIT = 20_000
 DEFAULT_SQL_ROW_LIMIT = 50
 DEFAULT_CENTRAL_LIMIT = 10
 DEFAULT_STORE_BODY = True
+DEFAULT_DIAGRAMS = True
 
 # Known assistants the setup selector offers. `binary` is what we probe for on
 # PATH; `command` is written into config.yaml. Order is the menu order.
@@ -109,6 +110,7 @@ class IndexConfig:
     """Workspace-tunable indexing behavior."""
 
     store_body: bool = DEFAULT_STORE_BODY
+    diagrams: bool = DEFAULT_DIAGRAMS
 
 
 @dataclass
@@ -146,8 +148,11 @@ class Config:
             central_limit=int(defaults_raw.get("central_limit", DEFAULT_CENTRAL_LIMIT)),
         )
         index_raw = data.get("index", {}) or {}
+        if not isinstance(index_raw, dict):
+            index_raw = {}
         index = IndexConfig(
             store_body=_bool_config(index_raw.get("store_body"), DEFAULT_STORE_BODY),
+            diagrams=_bool_config(index_raw.get("diagrams"), DEFAULT_DIAGRAMS),
         )
         return cls(
             ai=ai,
@@ -189,7 +194,10 @@ def write_config(
                 "central_limit": DEFAULT_CENTRAL_LIMIT,
             },
         )
-        data.setdefault("index", {"store_body": DEFAULT_STORE_BODY})
+        if not isinstance(data.get("index"), dict):
+            data["index"] = {}
+        data["index"].setdefault("store_body", DEFAULT_STORE_BODY)
+        data["index"].setdefault("diagrams", DEFAULT_DIAGRAMS)
         data.setdefault("gitignore", True)
         path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
         return path
@@ -219,6 +227,9 @@ def write_config(
         "  # keep only path/metadata/links in the catalog; run `quack reindex`\n"
         "  # after changing this so old catalog rows are rebuilt.\n"
         f"  store_body: {'true' if DEFAULT_STORE_BODY else 'false'}\n"
+        "  # Generate Mermaid link diagrams during `quack reindex` when folder\n"
+        "  # indexes changed. Use `quack reindex --no-diagrams` to skip once.\n"
+        f"  diagrams: {'true' if DEFAULT_DIAGRAMS else 'false'}\n"
         "\n"
         "# Set gitignore: false to opt out of quack managing a block in your\n"
         "# repo's .gitignore (and skip .quack/.gitignore creation).\n"

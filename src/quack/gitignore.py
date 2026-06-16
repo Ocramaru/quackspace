@@ -151,7 +151,15 @@ def _build_nested_block() -> str:
 def _apply_block(gitignore_path: Path, block: str) -> bool:
     """Idempotently insert or refresh the managed block in a .gitignore file."""
     content = gitignore_path.read_text() if gitignore_path.exists() else ""
+    new_content = _content_with_block(content, block)
+    if new_content != content:
+        gitignore_path.write_text(new_content)
+        return True
+    return False
 
+
+def _content_with_block(content: str, block: str) -> str:
+    """Return *content* with the managed block inserted or refreshed."""
     if BLOCK_START in content:
         start = content.index(BLOCK_START)
         end_marker = content.find(BLOCK_END, start)
@@ -162,14 +170,16 @@ def _apply_block(gitignore_path: Path, block: str) -> bool:
             if end < len(content) and content[end] == "\n":
                 end += 1
             new_content = content[:start] + block + content[end:]
-        if new_content != content:
-            gitignore_path.write_text(new_content)
-            return True
-        return False
+        return new_content
     else:
         sep = "\n" if content and not content.endswith("\n") else ""
-        gitignore_path.write_text(content + sep + block)
-        return True
+        return content + sep + block
+
+
+def _would_apply_block(gitignore_path: Path, block: str) -> bool:
+    """True if applying *block* would change *gitignore_path*."""
+    content = gitignore_path.read_text() if gitignore_path.exists() else ""
+    return _content_with_block(content, block) != content
 
 
 def _gitignore_opt_out(quack_root: Path) -> bool:
@@ -251,7 +261,48 @@ def ensure_gitignore(
     return summary
 
 
-def remove_gitignore(quack_root: Path) -> bool:
+def preview_gitignore(quack_root: Path) -> GitignoreSummary:
+    """Return the gitignore summary that would be produced, without writing."""
+    summary = GitignoreSummary()
+    self_ignore = quack_root / ".quack" / ".gitignore"
+    summary.self_ignore = self_ignore
+    if not self_ignore.exists() or self_ignore.read_text().strip() != "*":
+        summary.updated.append(self_ignore)
+
+    if _gitignore_opt_out(quack_root):
+        summary.opted_out = True
+        return summary
+
+    git_root = _find_git_root(quack_root)
+    if git_root is not None:
+        summary.protected.append(git_root)
+        path = git_root / ".gitignore"
+        if _would_apply_block(path, _build_block(quack_root, git_root)):
+            summary.updated.append(path)
+
+    try:
+        from .core import load_ignores
+
+        patterns = load_ignores(quack_root)
+    except Exception:
+        patterns = {".git", ".quack"}
+    if quack_root.exists():
+        nested_roots, scanned, skipped = _find_descendant_git_roots(
+            quack_root, patterns=patterns, with_stats=True
+        )
+    else:
+        nested_roots, scanned, skipped = [], 0, 0
+    summary.scanned_dirs = scanned
+    summary.skipped_dirs = skipped
+    for nested_root in nested_roots:
+        summary.protected.append(nested_root)
+        path = nested_root / ".gitignore"
+        if _would_apply_block(path, _build_nested_block()):
+            summary.updated.append(path)
+    return summary
+
+
+def remove_gitignore(quack_root: Path, dry_run: bool = False) -> bool:
     """Strip the quack-managed block from the nearest git repo's .gitignore,
     leaving the user's own lines intact. Returns True if a block was removed."""
     git_root = _find_git_root(quack_root)
@@ -274,8 +325,9 @@ def remove_gitignore(quack_root: Path) -> bool:
         new_content = content[:start] + content[end:]
     # Tidy a trailing blank left where the block was.
     new_content = new_content.rstrip("\n") + "\n" if new_content.strip() else ""
-    if new_content:
-        gitignore_path.write_text(new_content)
-    else:
-        gitignore_path.unlink()
+    if not dry_run:
+        if new_content:
+            gitignore_path.write_text(new_content)
+        else:
+            gitignore_path.unlink()
     return True
