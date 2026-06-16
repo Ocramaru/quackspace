@@ -302,7 +302,9 @@ def file_meta(path_or_name: str) -> dict[str, Any]:
 
     Field semantics:
     - `stale`: true when the file was modified after its description was last written.
-    - `links`: wikilink targets as {name, exists} — name is a bare stem, not a path."""
+    - `links`: wikilink targets as {name, path, ambiguous, exists} — `path` is the
+      root-relative path when resolved unambiguously, else null; `ambiguous` is true
+      when multiple files share the name."""
     root = _root()
     cur = catalog.read_cursor(_root_arg())
     try:
@@ -336,11 +338,27 @@ def file_meta(path_or_name: str) -> dict[str, Any]:
         link_rows = cur.execute(
             "SELECT dst, dst_exists FROM links WHERE src = ?", [name]
         ).fetchall()
+        dst_names = [dst for dst, _ in link_rows]
+        paths_by_dst: dict[str, list[str]] = {}
+        if dst_names:
+            ph = ",".join("?" for _ in dst_names)
+            for dst_name, dst_rel in cur.execute(
+                f"SELECT name, rel FROM files WHERE name IN ({ph})", dst_names
+            ).fetchall():
+                paths_by_dst.setdefault(dst_name, []).append(dst_rel)
     finally:
         cur.close()
 
     tags = [t for t in (tags_csv or "").split(",") if t]
-    links = [{"name": dst, "exists": bool(exists)} for dst, exists in link_rows]
+    links = []
+    for dst, exists in link_rows:
+        dst_paths = paths_by_dst.get(dst, [])
+        links.append({
+            "name": dst,
+            "path": dst_paths[0] if len(dst_paths) == 1 else None,
+            "ambiguous": len(dst_paths) > 1,
+            "exists": bool(exists),
+        })
     absolute_path = str(Path(root) / rel)
 
     return {
@@ -413,15 +431,29 @@ def graph_path(src: str, dst: str) -> dict[str, Any]:
     or null if they are not reachable from each other.
 
     Note: `path` contains file *names* (bare stems), not root-relative paths.
-    Pass each name to file_meta(path_or_name=name) to get metadata and absolute_path,
-    or use sql(\"SELECT rel FROM files WHERE name = '<name>'\") to resolve to a path."""
+    `nodes` provides the same sequence as `{name, path}` objects for direct use
+    with file_meta or your host file tool."""
     path = graph_mod.shortest_path(src, dst, explicit_root=_root_arg())
+    nodes = None
+    if path:
+        _cur = catalog.read_cursor(_root_arg())
+        try:
+            ph = ",".join("?" for _ in path)
+            _path_by_name = dict(
+                _cur.execute(
+                    f"SELECT name, rel FROM files WHERE name IN ({ph})", path
+                ).fetchall()
+            )
+        finally:
+            _cur.close()
+        nodes = [{"name": n, "path": _path_by_name.get(n)} for n in path]
     return {
         "root": _root(),
         "src": src,
         "dst": dst,
         "connected": path is not None,
         "path": path,
+        "nodes": nodes,
         "next_steps": (
             "Nodes in `path` are file names. Call file_meta(path_or_name=name) for "
             "metadata and the absolute path, then read with your host file tool."
@@ -457,12 +489,29 @@ def clusters() -> dict[str, Any]:
     (groups of inter-linked files) and isolated files (singletons — files with no
     wikilink edges at all, distinct from files.is_orphan which tracks inbound links).
     Complements search() when you want topological structure rather than relevance."""
+    raw_clusters = graph_mod.components(explicit_root=_root_arg())
+    all_names = [n for cluster in raw_clusters for n in cluster]
+    path_by_name: dict[str, str] = {}
+    if all_names:
+        _cur = catalog.read_cursor(_root_arg())
+        try:
+            ph = ",".join("?" for _ in all_names)
+            path_by_name = dict(
+                _cur.execute(
+                    f"SELECT name, rel FROM files WHERE name IN ({ph})", all_names
+                ).fetchall()
+            )
+        finally:
+            _cur.close()
     return {
         "root": _root(),
-        "clusters": graph_mod.components(explicit_root=_root_arg()),
+        "clusters": [
+            [{"name": n, "path": path_by_name.get(n)} for n in cluster]
+            for cluster in raw_clusters
+        ],
         "next_steps": (
-            "Each cluster is a list of file names. Call file_meta(path_or_name=name) "
-            "for metadata and absolute_path to read with your host tool. "
+            "Each cluster is a list of {name, path} objects. "
+            "Call file_meta(path_or_name=path) for metadata and absolute_path to read with your host tool. "
             "Use graph_path(src, dst) or sql() to inspect relationships among names in a cluster."
         ),
     }
@@ -482,6 +531,22 @@ def describe(
     space. After a batch of describe() calls, call reindex() once so changes show
     up in search/sql/map, then embed() to refresh semantic search."""
     from . import generate
+
+    _cur = catalog.read_cursor(_root_arg())
+    try:
+        _amb_rows = _cur.execute(
+            "SELECT rel, name, folder FROM files WHERE rel = ? OR name = ? LIMIT 2",
+            [path, path],
+        ).fetchall()
+    finally:
+        _cur.close()
+    if len(_amb_rows) > 1:
+        return {
+            "root": _root(),
+            "error": f"Ambiguous name {path!r} — multiple files match.",
+            "candidates": [{"path": r[0], "name": r[1], "folder": r[2]} for r in _amb_rows],
+            "next_steps": "Call describe(path=<path>, ...) with one of the candidate `path` values (root-relative, unambiguous).",
+        }
 
     rel = generate.record(_root_arg(), path, description, list(tags or []))
     if rel is None:
@@ -515,9 +580,31 @@ def reindex() -> dict[str, Any]:
     from .indexer import reindex as do_reindex
 
     summary = do_reindex(_root_arg())
+    described_files = 0
+    stale_files = 0
+    folder_count = 0
+    try:
+        _cur = catalog.read_cursor(_root_arg())
+        try:
+            row = _cur.execute(
+                "SELECT "
+                "COUNT(*) FILTER (WHERE description IS NOT NULL AND description != '') AS d, "
+                "COUNT(*) FILTER (WHERE stale) AS s "
+                "FROM files"
+            ).fetchone()
+            if row:
+                described_files, stale_files = row
+            folder_count = _cur.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
+        finally:
+            _cur.close()
+    except Exception:
+        pass
     return {
         "root": _root(),
         "files": summary["files"],
+        "described_files": described_files,
+        "stale_files": stale_files,
+        "folders": folder_count,
         "catalog": summary.get("catalog", "rebuilt"),
         "next_steps": "Catalog is current. Call search() or sql() to query it.",
     }
