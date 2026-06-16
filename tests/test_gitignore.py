@@ -8,8 +8,7 @@ import pytest
 import yaml
 
 from quack.gitignore import (
-    BLOCK_END,
-    BLOCK_START,
+    BLOCK_HEADER,
     ensure_gitignore,
     _find_descendant_git_roots,
 )
@@ -71,8 +70,7 @@ def test_creates_gitignore_when_absent(tmp_path):
     gi = git_root / ".gitignore"
     assert gi.exists()
     content = gi.read_text()
-    assert BLOCK_START in content
-    assert BLOCK_END in content
+    assert BLOCK_HEADER in content
     assert ".index.yaml" in content
     assert "_diagrams.md" in content
     assert "QUACK.md" in content
@@ -94,7 +92,7 @@ def test_idempotent_on_repeated_calls(tmp_path):
     ensure_gitignore(quack_root)
     second = (git_root / ".gitignore").read_text()
     assert first == second
-    assert first.count(BLOCK_START) == 1
+    assert first.count(BLOCK_HEADER) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -110,18 +108,19 @@ def test_user_lines_preserved(tmp_path):
     content = gi.read_text()
     assert "*.pyc" in content
     assert "__pycache__/" in content
-    assert BLOCK_START in content
+    assert BLOCK_HEADER in content
 
 
 def test_block_refreshed_in_place(tmp_path):
     git_root = _make_git_repo(tmp_path / "repo")
     quack_root = _make_quack_root(git_root)
     gi = git_root / ".gitignore"
+    # Existing block gets replaced in-place on next write.
     gi.write_text(
         "*.pyc\n"
-        f"{BLOCK_START}\n"
+        f"\n{BLOCK_HEADER}\n"
         "old-pattern\n"
-        f"{BLOCK_END}\n"
+        "\n"
         "*.log\n"
     )
     ensure_gitignore(quack_root)
@@ -130,7 +129,7 @@ def test_block_refreshed_in_place(tmp_path):
     assert ".index.yaml" in content
     assert "*.pyc" in content
     assert "*.log" in content
-    assert content.count(BLOCK_START) == 1
+    assert content.count(BLOCK_HEADER) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -274,8 +273,7 @@ def test_nested_git_repos_get_managed_block(tmp_path):
 
     for repo in (alpha, beta):
         content = (repo / ".gitignore").read_text()
-        assert BLOCK_START in content
-        assert BLOCK_END in content
+        assert BLOCK_HEADER in content
         assert "_diagrams.md" in content
         # Nested repos should not contain QUACK.md or .quack/ patterns.
         assert "QUACK.md" not in content
@@ -292,7 +290,7 @@ def test_nested_git_repo_block_idempotent(tmp_path):
     ensure_gitignore(quack_root)
     second = (alpha / ".gitignore").read_text()
     assert first == second
-    assert first.count(BLOCK_START) == 1
+    assert first.count(BLOCK_HEADER) == 1
 
 
 def test_nested_git_repo_preserves_user_lines(tmp_path):
@@ -303,7 +301,7 @@ def test_nested_git_repo_preserves_user_lines(tmp_path):
     content = (alpha / ".gitignore").read_text()
     assert "*.log" in content
     assert "build/" in content
-    assert BLOCK_START in content
+    assert BLOCK_HEADER in content
 
 
 def test_quack_root_not_in_git_nested_repos_still_get_block(tmp_path):
@@ -312,7 +310,7 @@ def test_quack_root_not_in_git_nested_repos_still_get_block(tmp_path):
     alpha = _make_git_repo(quack_root / "projects" / "alpha")
     ensure_gitignore(quack_root)
     content = (alpha / ".gitignore").read_text()
-    assert BLOCK_START in content
+    assert BLOCK_HEADER in content
     assert "_diagrams.md" in content
 
 
