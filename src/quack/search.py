@@ -34,6 +34,14 @@ def _in_hidden_dir(rel: str) -> bool:
     return any(p.startswith(".") for p in parts[:-1])
 
 
+def _load_local_boost(explicit_root: str | None) -> float:
+    try:
+        from .config import Config as _Config
+        return _Config.load(explicit_root).defaults.local_dir_boost
+    except Exception:
+        return 1.0
+
+
 def _in_local_dir(rel: str, cwd_rel: str) -> bool:
     """True if rel is inside or directly at the cwd directory."""
     return rel == cwd_rel or rel.startswith(cwd_rel + "/")
@@ -381,12 +389,7 @@ def search_folders(
     if progress is not None:
         progress(3, 3, "Folder search complete")
     if cwd_rel:
-        local_boost = 1.0
-        try:
-            from .config import Config as _Config
-            local_boost = _Config.load(explicit_root).defaults.local_dir_boost
-        except Exception:
-            pass
+        local_boost = _load_local_boost(explicit_root)
         if local_boost != 1.0:
             for h in hits.values():
                 if _in_local_dir(h.folder, cwd_rel) or cwd_rel.startswith(h.folder + "/"):

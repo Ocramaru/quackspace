@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 import frontmatter
+from fnmatch import fnmatch
 
 # Marker directory that identifies a quack root (like .git for a repo).
 MARKER_DIR = ".quack"
@@ -122,8 +123,6 @@ class IgnoreRuleset:
 
     def is_ignored(self, name: str, rel: str) -> bool:
         """True if this file/directory should be skipped by the walker."""
-        from fnmatch import fnmatch
-
         if name in self._builtins:
             return True
 

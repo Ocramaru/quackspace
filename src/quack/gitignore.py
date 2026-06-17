@@ -87,11 +87,11 @@ def _find_descendant_git_roots(
     with_stats: bool = False,
 ) -> "list[Path] | tuple[list[Path], int, int]":
     """Git repos whose .git sits beneath *path* (not at *path* itself)."""
-    from .core import IgnoreRuleset
+    from .core import DEFAULT_IGNORED_DIRS, IgnoreRuleset
     result: list[Path] = []
     scanned = 0
     skipped = 0
-    ignore_rules = patterns or IgnoreRuleset.build({".git", ".quack"}, [])
+    ignore_rules = patterns or IgnoreRuleset.build(DEFAULT_IGNORED_DIRS, [])
     for dirpath, dirnames, _filenames in os.walk(path):
         base = Path(dirpath)
         scanned += 1
@@ -235,8 +235,8 @@ def ensure_gitignore(
 
         patterns = load_ignores(quack_root)
     except Exception:
-        from .core import IgnoreRuleset
-        patterns = IgnoreRuleset.build({".git", ".quack"}, [])
+        from .core import DEFAULT_IGNORED_DIRS, IgnoreRuleset
+        patterns = IgnoreRuleset.build(DEFAULT_IGNORED_DIRS, [])
     if progress is not None:
         progress(0, -1, "Waddling through files: 0")
     nested_roots, scanned, skipped = _find_descendant_git_roots(
@@ -278,8 +278,8 @@ def preview_gitignore(quack_root: Path) -> GitignoreSummary:
 
         patterns = load_ignores(quack_root)
     except Exception:
-        from .core import IgnoreRuleset
-        patterns = IgnoreRuleset.build({".git", ".quack"}, [])
+        from .core import DEFAULT_IGNORED_DIRS, IgnoreRuleset
+        patterns = IgnoreRuleset.build(DEFAULT_IGNORED_DIRS, [])
     if quack_root.exists():
         nested_roots, scanned, skipped = _find_descendant_git_roots(
             quack_root, patterns=patterns, with_stats=True

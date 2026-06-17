@@ -905,7 +905,7 @@ def _dispatch(argv: list[str] | None) -> int:
         # Resolve cwd relative to the workspace root for locality boosting.
         # None when --no-local is set, cwd is the root itself, or cwd is outside.
         cwd_rel: str | None = None
-        if not getattr(args, "no_local", False):
+        if not args.no_local:
             try:
                 rel = Path.cwd().relative_to(root_path).as_posix()
                 cwd_rel = rel if rel != "." else None
