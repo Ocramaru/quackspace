@@ -87,6 +87,7 @@ class EmbedConfig:
     provider: str = ""
     dim: int = 0  # vector dimension; 0 = infer from first embedding
     timeout: int = DEFAULT_AI_TIMEOUT
+    skip: bool = False  # user opted out of embeddings; never prompt to set up again
 
     @property
     def configured(self) -> bool:
@@ -143,6 +144,7 @@ class Config:
             provider=str(emb_raw.get("provider", "") or ""),
             dim=int(emb_raw.get("dim", 0)),
             timeout=int(emb_raw.get("timeout", DEFAULT_AI_TIMEOUT)),
+            skip=bool(emb_raw.get("skip", False)),
         )
         defaults_raw = data.get("defaults", {}) or {}
         defaults = DefaultsConfig(
@@ -285,6 +287,7 @@ def write_embed_config(
     dim: int = 0,
     timeout: int = DEFAULT_AI_TIMEOUT,
     provider: str = "custom",
+    skip: bool = False,
 ) -> Path:
     """Write the embedding command, preserving the rest of config.yaml."""
     root = find_root(explicit_root)
@@ -295,7 +298,18 @@ def write_embed_config(
         "command": command,
         "dim": dim,
         "timeout": timeout,
+        "skip": skip,
     }
+    _write_config_data(path, data)
+    return path
+
+
+def write_embed_skip(explicit_root: str | None = None) -> Path:
+    """Permanently opt out of embedding setup prompts (embed.skip: true)."""
+    root = find_root(explicit_root)
+    path = root / ".quack" / CONFIG_NAME
+    data = _ensure_config_shape(_load_config_data(path))
+    data.setdefault("embed", {})["skip"] = True
     _write_config_data(path, data)
     return path
 

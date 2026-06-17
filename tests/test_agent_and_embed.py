@@ -226,6 +226,7 @@ def test_embed_setup_ollama_provider_can_pull(tmp_path, monkeypatch):
         "command": OLLAMA_EMBED_COMMAND,
         "dim": 3,
         "timeout": 9,
+        "skip": False,
     }
 
 

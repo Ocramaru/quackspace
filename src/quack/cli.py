@@ -518,6 +518,8 @@ def _maybe_setup_embeddings(root: str, *, can_build: bool) -> None:
     if not sys.stdin.isatty():
         return
     config = Config.load(root)
+    if config.embed.skip:
+        return
     if config.embed.configured and config.embed.provider != "builtin":
         return
     if not yes_no("Choose semantic search embedding provider?", default=True):
@@ -560,29 +562,32 @@ def _clean_targets_from_args(args) -> set[str] | None:
 
 
 def _choose_clean_mode() -> tuple[set[str] | None, bool] | None:
-    print("Choose what to clean:")
-    print("  1. derived artifacts (catalog, map, diagrams)")
-    print("  2. diagrams only")
-    print("  3. catalog and map only")
-    print("  4. full uninstall (also .index.yaml, QUACK.md, .quack/)")
-    print("  5. cancel")
-    try:
-        choice = input("Clean [1-5]: ").strip()
-    except EOFError:
-        choice = ""
-    if choice in ("", "1"):
-        return None, False
-    if choice == "2":
+    from .prompts import Choice, choice as pick
+
+    selected = pick(
+        "What would you like to clean?",
+        [
+            Choice("derived", "Derived artifacts (catalog, map, diagrams)"),
+            Choice("diagrams", "Diagrams only"),
+            Choice("catalog", "Catalog and map only"),
+            Choice("purge", "Full uninstall (removes authored metadata too)"),
+            Choice("cancel", "Cancel"),
+        ],
+        default="derived",
+    )
+    if selected == "cancel":
+        return None
+    if selected == "diagrams":
         return {"diagrams"}, False
-    if choice == "3":
+    if selected == "catalog":
         return {"catalog", "map"}, False
-    if choice == "4":
+    if selected == "purge":
         ok = yes_no(
             "Full uninstall deletes authored .index.yaml metadata. Continue?",
             default=False,
         )
         return (None, True) if ok else None
-    return None
+    return None, False  # derived (default)
 
 
 def _print_clean_report(removed: dict, *, purge: bool, dry_run: bool) -> None:

@@ -43,8 +43,15 @@ Recording what you know:
 - `describe(path, description, tags)` writes metadata into the editable store for
   a file you understand. If you already know this repo, describe its relevant
   files (one call each), then call `reindex()` ONCE so search/sql reflect them.
+  Follow that with `embed()` if you want semantic search to reflect the changes.
   This is the intended way to seed quack on a codebase an agent already knows.
 - File CONTENTS are read-only here; only metadata (descriptions, tags) is writable.
+
+Semantic search:
+- `search()` automatically uses semantic (vector) similarity when embeddings
+  exist. The `tiers` field on each hit shows which search modes contributed.
+- `embed()` builds or refreshes embeddings. Call it after `reindex()` to keep
+  the semantic tier current. It is a no-op if embeddings are not configured.
 
 All paths are RELATIVE to the quack root, which every result reports as `root`.
 To open a file, join root + path. Never assume an absolute path.
@@ -294,7 +301,8 @@ def describe(
     editable .index.yaml store (the file itself is not modified). Use this to
     annotate a repo you already know without re-reading every file. `path` is a
     root-relative path or a bare file name. After a batch of describe() calls,
-    call reindex() once so the changes show up in search/sql/map."""
+    call reindex() once so the changes show up in search/sql/map, then embed()
+    to refresh semantic search."""
     from . import generate
 
     rel = generate.record(_root_arg(), path, description, list(tags or []))
@@ -305,18 +313,50 @@ def describe(
         "recorded": rel,
         "description": description,
         "tags": list(tags or []),
-        "note": "call reindex() when done to refresh search/sql",
+        "note": "call reindex() when done to refresh search/sql, then embed() for semantic search",
     }
 
 
 @mcp.tool()
 def reindex() -> dict[str, Any]:
     """Rebuild the indexes, map, and catalog so prior describe() calls are
-    reflected in search/sql/map. Call once after recording descriptions."""
+    reflected in search/sql/map. Does NOT rebuild embeddings — call embed()
+    after reindex() to refresh semantic search."""
     from .indexer import reindex as do_reindex
 
     summary = do_reindex(_root_arg())
     return {"root": _root(), "files": summary["files"]}
+
+
+@mcp.tool()
+def embed() -> dict[str, Any]:
+    """Build or refresh semantic search embeddings for all files and folders.
+    Only re-embeds items whose content changed since the last run (incremental).
+    Call after reindex() to keep semantic search current. Returns a summary of
+    what was embedded, skipped, and deleted. If no embedding command is
+    configured (embed.command in .quack/config.yaml), returns an error key
+    instead of raising — run `quack embed init` at the terminal to set one up."""
+    from .embed import EmbedNotConfigured, build_embeddings
+
+    try:
+        summary = build_embeddings(_root_arg())
+    except EmbedNotConfigured:
+        return {
+            "root": _root(),
+            "error": "No embedding command configured. Run `quack embed init` at the terminal first.",
+        }
+    return {
+        "root": _root(),
+        "embedded": summary["embedded"],
+        "folders": summary["folders"],
+        "dim": summary["dim"],
+        "updated": summary["updated"],
+        "skipped": summary["skipped"],
+        "deleted": summary["deleted"],
+        "folders_updated": summary["folders_updated"],
+        "folders_skipped": summary["folders_skipped"],
+        "folders_deleted": summary["folders_deleted"],
+    }
 
 
 def _parser() -> argparse.ArgumentParser:

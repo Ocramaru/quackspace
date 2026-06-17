@@ -422,6 +422,9 @@ def build_embeddings(
             (i.rel, i.parent, embed_cache_hash(source_hash, config.embed.command), text)
         )
 
+    if config.embed.provider == "ollama":
+        _ensure_ollama_server(timeout=config.embed.timeout)
+
     invalidate(path)  # free any cached read-only connection before writing
     con = duckdb.connect(str(path))
     try:

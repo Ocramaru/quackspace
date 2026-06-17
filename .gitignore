@@ -30,3 +30,6 @@ QUACK.md
 
 # OS
 .DS_Store
+
+# Local test sandbox (not part of the project)
+test-quackspace/
