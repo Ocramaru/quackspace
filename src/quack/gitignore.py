@@ -102,7 +102,7 @@ def _find_descendant_git_roots(
         base = Path(dirpath)
         scanned += 1
         if progress is not None and (scanned == 1 or scanned % 100 == 0):
-            progress(scanned, max(scanned + 1, 1), f"Scanning {_rel_display(base, path)}")
+            progress(scanned, -1, f"Waddling through files: {scanned:,}")
         if base != path and (base / ".git").exists():
             result.append(base)
         kept: list[str] = []
@@ -114,7 +114,7 @@ def _find_descendant_git_roots(
             kept.append(name)
         dirnames[:] = kept
     if progress is not None:
-        progress(scanned, max(scanned, 1), "Scanned nested git repos")
+        progress(scanned, -1, f"Checked {scanned:,} folder(s) for git repos")
     if with_stats:
         return result, scanned, skipped
     return result
@@ -243,7 +243,7 @@ def ensure_gitignore(
     except Exception:
         patterns = {".git", ".quack"}
     if progress is not None:
-        progress(0, 1, "Scanning nested git repos")
+        progress(0, -1, "Waddling through files: 0")
     nested_roots, scanned, skipped = _find_descendant_git_roots(
         quack_root, patterns=patterns, progress=progress, with_stats=True
     )
