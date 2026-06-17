@@ -35,6 +35,7 @@ DEFAULT_FILE_CHAR_LIMIT = 20_000
 DEFAULT_SQL_ROW_LIMIT = 50
 DEFAULT_CENTRAL_LIMIT = 10
 DEFAULT_HIDDEN_DIR_PENALTY = 1.0
+DEFAULT_LOCAL_DIR_BOOST = 1.5
 DEFAULT_STORE_BODY = True
 DEFAULT_DIAGRAMS = True
 
@@ -108,6 +109,7 @@ class DefaultsConfig:
     sql_row_limit: int = DEFAULT_SQL_ROW_LIMIT
     central_limit: int = DEFAULT_CENTRAL_LIMIT
     hidden_dir_penalty: float = DEFAULT_HIDDEN_DIR_PENALTY
+    local_dir_boost: float = DEFAULT_LOCAL_DIR_BOOST
 
 
 @dataclass
@@ -155,6 +157,7 @@ class Config:
             sql_row_limit=int(defaults_raw.get("sql_row_limit", DEFAULT_SQL_ROW_LIMIT)),
             central_limit=int(defaults_raw.get("central_limit", DEFAULT_CENTRAL_LIMIT)),
             hidden_dir_penalty=float(defaults_raw.get("hidden_dir_penalty", DEFAULT_HIDDEN_DIR_PENALTY)),
+            local_dir_boost=float(defaults_raw.get("local_dir_boost", DEFAULT_LOCAL_DIR_BOOST)),
         )
         index_raw = data.get("index", {}) or {}
         if not isinstance(index_raw, dict):

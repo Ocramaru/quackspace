@@ -89,7 +89,7 @@ def _catalog_lock_paths(root: str | Path) -> list[Path]:
     if not state.exists():
         return []
     paths = [state / DB_NAME]
-    paths.extend(sorted(state.glob(f"{DB_NAME}.prev-*")))
+    paths.extend(sorted(state.glob(f"{DB_NAME}.build-*")))
     return [path for path in paths if path.exists()]
 
 
@@ -316,6 +316,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_search.add_argument(
         "--folders", action="store_true", help="force only folder-level search"
+    )
+    p_search.add_argument(
+        "--no-local", action="store_true",
+        help="disable current-directory locality boost (search the full workspace equally)",
     )
 
     p_graph = sub.add_parser("graph", help="graph queries over the link structure")
@@ -895,7 +899,19 @@ def _dispatch(argv: list[str] | None) -> int:
         from ._duck import paddling
 
         terms = " ".join(args.query)
-        root = str(find_root(args.root))
+        root_path = find_root(args.root)
+        root = str(root_path)
+
+        # Resolve cwd relative to the workspace root for locality boosting.
+        # None when --no-local is set, cwd is the root itself, or cwd is outside.
+        cwd_rel: str | None = None
+        if not getattr(args, "no_local", False):
+            try:
+                rel = Path.cwd().relative_to(root_path).as_posix()
+                cwd_rel = rel if rel != "." else None
+            except ValueError:
+                pass
+
         if args.fts:
             from . import catalog
 
@@ -938,9 +954,12 @@ def _dispatch(argv: list[str] | None) -> int:
                     terms,
                     explicit_root=args.root,
                     limit=args.limit,
+                    cwd_rel=cwd_rel,
                     progress=progress.update,
                 )
             print(f"# root: {root}  (paths below are relative to it)")
+            if cwd_rel:
+                print(f"# cwd:  {cwd_rel}/")
             print(format_folder_hits(fhits))
             return 0 if fhits else 1
 
@@ -952,6 +971,7 @@ def _dispatch(argv: list[str] | None) -> int:
                 explicit_root=args.root,
                 limit=args.limit,
                 expand=not args.no_expand,
+                cwd_rel=cwd_rel,
                 progress=progress.update,
             )
             fhits: list = []
@@ -960,8 +980,11 @@ def _dispatch(argv: list[str] | None) -> int:
                     terms,
                     explicit_root=args.root,
                     limit=args.limit,
+                    cwd_rel=cwd_rel,
                     progress=progress.update,
                 )
+        if cwd_rel:
+            print(f"# cwd: {cwd_rel}/  (local results boosted)")
         print(format_hits(hits, root=root))
         if fhits:
             print("\n# folders")

@@ -33,6 +33,11 @@ def _in_hidden_dir(rel: str) -> bool:
     parts = rel.split("/")
     return any(p.startswith(".") for p in parts[:-1])
 
+
+def _in_local_dir(rel: str, cwd_rel: str) -> bool:
+    """True if rel is inside or directly at the cwd directory."""
+    return rel == cwd_rel or rel.startswith(cwd_rel + "/")
+
 # Field weights for the structural tier (short fields only; body is the FTS
 # tier's domain). A hit in the name matters more than one in the description.
 WEIGHT_NAME = 10
@@ -157,6 +162,7 @@ def search(
     explicit_root: str | None = None,
     limit: int = 10,
     expand: bool = True,
+    cwd_rel: str | None = None,
     progress: Callable[[int, int, str], None] | None = None,
 ) -> list[Hit]:
     """Auto-hybrid search: fuse every available tier, then expand on the graph.
@@ -186,9 +192,12 @@ def search(
         step += 1
 
     hidden_penalty = 1.0
+    local_boost = 1.0
     try:
         from .config import Config as _Config
-        hidden_penalty = _Config.load(explicit_root).defaults.hidden_dir_penalty
+        _cfg = _Config.load(explicit_root).defaults
+        hidden_penalty = _cfg.hidden_dir_penalty
+        local_boost = _cfg.local_dir_boost
     except Exception:
         pass
 
@@ -282,6 +291,8 @@ def search(
             if doc is not None:
                 if hidden_penalty < 1.0 and _in_hidden_dir(doc.rel):
                     score *= hidden_penalty
+                if cwd_rel and local_boost != 1.0 and _in_local_dir(doc.rel, cwd_rel):
+                    score *= local_boost
                 hits[name] = Hit(
                     entry=doc,
                     score=score,
@@ -306,6 +317,7 @@ def search_folders(
     query: str,
     explicit_root: str | None = None,
     limit: int = 10,
+    cwd_rel: str | None = None,
     progress: Callable[[int, int, str], None] | None = None,
 ) -> list[FolderHit]:
     """Folder-level search, kept distinct from file hits. Prefers the folder
@@ -368,6 +380,18 @@ def search_folders(
 
     if progress is not None:
         progress(3, 3, "Folder search complete")
+    if cwd_rel:
+        local_boost = 1.0
+        try:
+            from .config import Config as _Config
+            local_boost = _Config.load(explicit_root).defaults.local_dir_boost
+        except Exception:
+            pass
+        if local_boost != 1.0:
+            for h in hits.values():
+                if _in_local_dir(h.folder, cwd_rel) or cwd_rel.startswith(h.folder + "/"):
+                    h.score *= local_boost
+
     ranked = sorted(hits.values(), key=lambda h: (-h.score, h.folder))
     return ranked[:limit]
 
