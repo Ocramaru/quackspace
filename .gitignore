@@ -30,3 +30,12 @@ QUACK.md
 
 # OS
 .DS_Store
+
+# Local test sandbox (not part of the project)
+test-quackspace/
+
+# ignore quackspace files
+.index.yaml
+_diagrams.md
+test-quackspace/QUACK.md
+test-quackspace/.quack/

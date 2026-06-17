@@ -27,6 +27,12 @@ from . import catalog
 from .core import Space, find_root
 from .catalog import DB_NAME
 
+
+def _in_hidden_dir(rel: str) -> bool:
+    """True if any directory component of the path starts with a dot."""
+    parts = rel.split("/")
+    return any(p.startswith(".") for p in parts[:-1])
+
 # Field weights for the structural tier (short fields only; body is the FTS
 # tier's domain). A hit in the name matters more than one in the description.
 WEIGHT_NAME = 10
@@ -179,6 +185,13 @@ def search(
             progress(step, total_steps, message)
         step += 1
 
+    hidden_penalty = 1.0
+    try:
+        from .config import Config as _Config
+        hidden_penalty = _Config.load(explicit_root).defaults.hidden_dir_penalty
+    except Exception:
+        pass
+
     report("Opening catalog")
     db = find_root(explicit_root) / ".quack" / DB_NAME
     cur = None
@@ -267,6 +280,8 @@ def search(
         for name, score in fused.items():
             doc = doc_by_name.get(name)
             if doc is not None:
+                if hidden_penalty < 1.0 and _in_hidden_dir(doc.rel):
+                    score *= hidden_penalty
                 hits[name] = Hit(
                     entry=doc,
                     score=score,

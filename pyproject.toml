@@ -65,6 +65,7 @@ packages = ["src/quack"]
 # `perf` marks timing benchmarks; deselected by default (opt in with
 # `pytest -m perf`) so the normal suite stays fast and non-flaky.
 addopts = "-m 'not perf'"
+testpaths = ["tests"]
 markers = [
     "perf: timing benchmark, run with `pytest -m perf`",
 ]

@@ -34,6 +34,7 @@ DEFAULT_SEARCH_LIMIT = 10
 DEFAULT_FILE_CHAR_LIMIT = 20_000
 DEFAULT_SQL_ROW_LIMIT = 50
 DEFAULT_CENTRAL_LIMIT = 10
+DEFAULT_HIDDEN_DIR_PENALTY = 1.0
 DEFAULT_STORE_BODY = True
 DEFAULT_DIAGRAMS = True
 
@@ -83,8 +84,11 @@ class EmbedConfig:
     {text} is substituted, or the text is piped on stdin if {text} is absent."""
 
     command: str = ""
+    provider: str = ""
     dim: int = 0  # vector dimension; 0 = infer from first embedding
     timeout: int = DEFAULT_AI_TIMEOUT
+    include_body: bool = True
+    skip: bool = False  # user opted out of embeddings; never prompt to set up again
 
     @property
     def configured(self) -> bool:
@@ -103,6 +107,7 @@ class DefaultsConfig:
     file_char_limit: int = DEFAULT_FILE_CHAR_LIMIT
     sql_row_limit: int = DEFAULT_SQL_ROW_LIMIT
     central_limit: int = DEFAULT_CENTRAL_LIMIT
+    hidden_dir_penalty: float = DEFAULT_HIDDEN_DIR_PENALTY
 
 
 @dataclass
@@ -137,8 +142,11 @@ class Config:
         emb_raw = data.get("embed", {}) or {}
         embed = EmbedConfig(
             command=str(emb_raw.get("command", "") or ""),
+            provider=str(emb_raw.get("provider", "") or ""),
             dim=int(emb_raw.get("dim", 0)),
             timeout=int(emb_raw.get("timeout", DEFAULT_AI_TIMEOUT)),
+            include_body=_bool_config(emb_raw.get("include_body"), True),
+            skip=bool(emb_raw.get("skip", False)),
         )
         defaults_raw = data.get("defaults", {}) or {}
         defaults = DefaultsConfig(
@@ -146,6 +154,7 @@ class Config:
             file_char_limit=int(defaults_raw.get("file_char_limit", DEFAULT_FILE_CHAR_LIMIT)),
             sql_row_limit=int(defaults_raw.get("sql_row_limit", DEFAULT_SQL_ROW_LIMIT)),
             central_limit=int(defaults_raw.get("central_limit", DEFAULT_CENTRAL_LIMIT)),
+            hidden_dir_penalty=float(defaults_raw.get("hidden_dir_penalty", DEFAULT_HIDDEN_DIR_PENALTY)),
         )
         index_raw = data.get("index", {}) or {}
         if not isinstance(index_raw, dict):
@@ -163,6 +172,54 @@ class Config:
         )
 
 
+def _default_defaults_config() -> dict:
+    return {
+        "search_limit": DEFAULT_SEARCH_LIMIT,
+        "file_char_limit": DEFAULT_FILE_CHAR_LIMIT,
+        "sql_row_limit": DEFAULT_SQL_ROW_LIMIT,
+        "central_limit": DEFAULT_CENTRAL_LIMIT,
+    }
+
+
+def _default_embed_config() -> dict:
+    return {
+        "provider": "builtin",
+        "command": "quack embed text",
+        "dim": 256,
+        "timeout": DEFAULT_AI_TIMEOUT,
+        "include_body": True,
+    }
+
+
+def _load_config_data(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _ensure_config_shape(data: dict) -> dict:
+    data.setdefault("ai", {"command": "", "timeout": DEFAULT_AI_TIMEOUT, "skip": False})
+    data.setdefault("defaults", _default_defaults_config())
+    if not isinstance(data.get("index"), dict):
+        data["index"] = {}
+    data["index"].setdefault("store_body", DEFAULT_STORE_BODY)
+    data["index"].setdefault("diagrams", DEFAULT_DIAGRAMS)
+    data.setdefault("embed", _default_embed_config())
+    if not isinstance(data.get("embed"), dict):
+        data["embed"] = _default_embed_config()
+    data["embed"].setdefault("include_body", True)
+    data.setdefault("gitignore", True)
+    return data
+
+
+def _write_config_data(path: Path, data: dict) -> None:
+    path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+
+
 def write_config(
     command: str,
     explicit_root: str | None = None,
@@ -178,28 +235,9 @@ def write_config(
     path = root / ".quack" / CONFIG_NAME
 
     if path.exists():
-        try:
-            data = yaml.safe_load(path.read_text()) or {}
-        except yaml.YAMLError:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
+        data = _ensure_config_shape(_load_config_data(path))
         data["ai"] = {"command": command, "timeout": timeout, "skip": skip}
-        data.setdefault(
-            "defaults",
-            {
-                "search_limit": DEFAULT_SEARCH_LIMIT,
-                "file_char_limit": DEFAULT_FILE_CHAR_LIMIT,
-                "sql_row_limit": DEFAULT_SQL_ROW_LIMIT,
-                "central_limit": DEFAULT_CENTRAL_LIMIT,
-            },
-        )
-        if not isinstance(data.get("index"), dict):
-            data["index"] = {}
-        data["index"].setdefault("store_body", DEFAULT_STORE_BODY)
-        data["index"].setdefault("diagrams", DEFAULT_DIAGRAMS)
-        data.setdefault("gitignore", True)
-        path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+        _write_config_data(path, data)
         return path
 
     body = (
@@ -231,11 +269,58 @@ def write_config(
         "  # indexes changed. Use `quack reindex --no-diagrams` to skip once.\n"
         f"  diagrams: {'true' if DEFAULT_DIAGRAMS else 'false'}\n"
         "\n"
+        "embed:\n"
+        "  # Free local default. Run `quack embed init` to choose Ollama or\n"
+        "  # another provider, or edit this command directly. The command must\n"
+        "  # print one JSON array of floats; if {text} is omitted, text is piped\n"
+        "  # on stdin.\n"
+        "  provider: builtin\n"
+        "  command: quack embed text\n"
+        "  dim: 256\n"
+        f"  timeout: {DEFAULT_AI_TIMEOUT}\n"
+        "  # Set false to embed only path/name/type/tags/description/links,\n"
+        "  # without raw file body content.\n"
+        "  include_body: true\n"
+        "\n"
         "# Set gitignore: false to opt out of quack managing a block in your\n"
         "# repo's .gitignore (and skip .quack/.gitignore creation).\n"
         "gitignore: true\n"
     )
     path.write_text(body)
+    return path
+
+
+def write_embed_config(
+    command: str,
+    explicit_root: str | None = None,
+    dim: int = 0,
+    timeout: int = DEFAULT_AI_TIMEOUT,
+    provider: str = "custom",
+    skip: bool = False,
+) -> Path:
+    """Write the embedding command, preserving the rest of config.yaml."""
+    root = find_root(explicit_root)
+    path = root / ".quack" / CONFIG_NAME
+    data = _ensure_config_shape(_load_config_data(path))
+    data["embed"] = {
+        "provider": provider,
+        "command": command,
+        "dim": dim,
+        "timeout": timeout,
+        "include_body": _bool_config(data.get("embed", {}).get("include_body"), True),
+        "skip": skip,
+    }
+    _write_config_data(path, data)
+    return path
+
+
+def write_embed_skip(explicit_root: str | None = None) -> Path:
+    """Permanently opt out of embedding setup prompts (embed.skip: true)."""
+    root = find_root(explicit_root)
+    path = root / ".quack" / CONFIG_NAME
+    data = _ensure_config_shape(_load_config_data(path))
+    data.setdefault("embed", {})["skip"] = True
+    _write_config_data(path, data)
     return path
 
 

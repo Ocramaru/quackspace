@@ -23,12 +23,9 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Callable
 
-BLOCK_START = "# >>> quack (managed) >>>"
-BLOCK_END = "# <<< quack (managed) <<<"
+BLOCK_HEADER = "# ignore quackspace files"
 
-# Patterns that match anywhere in the tree — file names quack generates
-# into every folder. .index.yaml is included: descriptions are cheap to
-# regenerate so there's no value in tracking them in git.
+# File-name patterns quack generates into every folder.
 _TREE_PATTERNS = [".index.yaml", "_diagrams.md"]
 
 
@@ -124,28 +121,38 @@ def _find_descendant_git_roots(
 
 
 def _build_block(quack_root: Path, git_root: Path) -> str:
-    lines = [BLOCK_START]
-    lines.extend(_TREE_PATTERNS)
-
-    # QUACK.md and .quack/ are anchored to the quack root within the git tree.
     try:
         rel = quack_root.relative_to(git_root)
         prefix = rel.as_posix() + "/" if rel != Path(".") else ""
     except ValueError:
         prefix = ""
-
-    lines.append(f"{prefix}QUACK.md")
-    lines.append(f"{prefix}.quack/")
-    lines.append(BLOCK_END)
-    return "\n".join(lines) + "\n"
+    patterns = [*_TREE_PATTERNS, f"{prefix}QUACK.md", f"{prefix}.quack/"]
+    return "\n" + "\n".join([BLOCK_HEADER, *patterns]) + "\n"
 
 
 def _build_nested_block() -> str:
-    """Block for nested git repos: only tree-wide patterns, no anchored paths."""
-    lines = [BLOCK_START]
-    lines.extend(_TREE_PATTERNS)
-    lines.append(BLOCK_END)
-    return "\n".join(lines) + "\n"
+    return "\n" + "\n".join([BLOCK_HEADER, *_TREE_PATTERNS]) + "\n"
+
+
+def _find_block(content: str) -> tuple[int, int] | None:
+    """Return (start, end) of the quack block in *content*, or None if absent.
+    start includes the preceding blank-line separator; end is the position just
+    after the last pattern line."""
+    if BLOCK_HEADER not in content:
+        return None
+    header_pos = content.index(BLOCK_HEADER)
+    start = header_pos - 1 if header_pos > 0 and content[header_pos - 1] == "\n" else header_pos
+    pos = content.find("\n", header_pos)
+    if pos == -1:
+        return start, len(content)
+    pos += 1
+    while pos < len(content):
+        line_end = content.find("\n", pos)
+        line = content[pos:line_end] if line_end != -1 else content[pos:]
+        if not line or line.startswith("#"):
+            break
+        pos = line_end + 1 if line_end != -1 else len(content)
+    return start, pos
 
 
 def _apply_block(gitignore_path: Path, block: str) -> bool:
@@ -159,25 +166,16 @@ def _apply_block(gitignore_path: Path, block: str) -> bool:
 
 
 def _content_with_block(content: str, block: str) -> str:
-    """Return *content* with the managed block inserted or refreshed."""
-    if BLOCK_START in content:
-        start = content.index(BLOCK_START)
-        end_marker = content.find(BLOCK_END, start)
-        if end_marker == -1:
-            new_content = content[:start] + block
-        else:
-            end = end_marker + len(BLOCK_END)
-            if end < len(content) and content[end] == "\n":
-                end += 1
-            new_content = content[:start] + block + content[end:]
-        return new_content
-    else:
-        sep = "\n" if content and not content.endswith("\n") else ""
-        return content + sep + block
+    block_range = _find_block(content)
+    if block_range:
+        s, e = block_range
+        return content[:s] + block + content[e:]
+    if content and not content.endswith("\n"):
+        content += "\n"
+    return content + block
 
 
 def _would_apply_block(gitignore_path: Path, block: str) -> bool:
-    """True if applying *block* would change *gitignore_path*."""
     content = gitignore_path.read_text() if gitignore_path.exists() else ""
     return _content_with_block(content, block) != content
 
@@ -303,31 +301,28 @@ def preview_gitignore(quack_root: Path) -> GitignoreSummary:
 
 
 def remove_gitignore(quack_root: Path, dry_run: bool = False) -> bool:
-    """Strip the quack-managed block from the nearest git repo's .gitignore,
-    leaving the user's own lines intact. Returns True if a block was removed."""
+    """Strip the quack-managed block from the nearest git repo's .gitignore
+    and every nested git repo beneath the quack root, leaving user lines intact.
+    Returns True if at least one block was removed."""
     git_root = _find_git_root(quack_root)
-    if git_root is None:
-        return False
-    gitignore_path = git_root / ".gitignore"
-    if not gitignore_path.exists():
-        return False
-    content = gitignore_path.read_text()
-    if BLOCK_START not in content:
-        return False
-    start = content.index(BLOCK_START)
-    end_marker = content.find(BLOCK_END, start)
-    if end_marker == -1:
-        new_content = content[:start]
-    else:
-        end = end_marker + len(BLOCK_END)
-        if end < len(content) and content[end] == "\n":
-            end += 1
+    candidates = ([git_root] if git_root else []) + list(_find_descendant_git_roots(quack_root))
+    removed = False
+
+    for root in candidates:
+        gitignore_path = root / ".gitignore"
+        if not gitignore_path.exists():
+            continue
+        content = gitignore_path.read_text()
+        block_range = _find_block(content)
+        if block_range is None:
+            continue
+        start, end = block_range
         new_content = content[:start] + content[end:]
-    # Tidy a trailing blank left where the block was.
-    new_content = new_content.rstrip("\n") + "\n" if new_content.strip() else ""
-    if not dry_run:
-        if new_content:
-            gitignore_path.write_text(new_content)
-        else:
-            gitignore_path.unlink()
-    return True
+        new_content = new_content.rstrip("\n") + "\n" if new_content.strip() else ""
+        if not dry_run:
+            if new_content:
+                gitignore_path.write_text(new_content)
+            else:
+                gitignore_path.unlink()
+        removed = True
+    return removed

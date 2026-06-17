@@ -141,7 +141,7 @@ def test_init_no_gitignore_skips_repo_gitignore(tmp_path, capsys, monkeypatch):
 def test_init_interactive_choices_update_config_before_writes(tmp_path, capsys, monkeypatch):
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
-    answers = iter(["n", "n"])
+    answers = iter(["n", "n", "n"])
     monkeypatch.setenv("QUACK_NO_ANIM", "1")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(builtins, "input", lambda _prompt: next(answers))
@@ -160,6 +160,55 @@ def test_init_interactive_choices_update_config_before_writes(tmp_path, capsys, 
     config = yaml.safe_load((repo / ".quack" / "config.yaml").read_text())
     assert config["gitignore"] is False
     assert config["index"]["diagrams"] is False
+
+
+def test_init_interactive_can_setup_embeddings_without_building(tmp_path, capsys, monkeypatch):
+    import yaml
+
+    root = tmp_path / "space"
+    script = tmp_path / "embedder.py"
+    script.write_text("import json; print(json.dumps([0.1, 0.2, 0.3, 0.4]))\n")
+    answers = iter(["y", "y", "y", f"{sys.executable} {script}", "n"])
+    monkeypatch.setenv("QUACK_NO_ANIM", "1")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(builtins, "input", lambda _prompt: next(answers))
+    monkeypatch.setattr("quack.cli.run_setup", lambda _root: None)
+    monkeypatch.setattr(
+        "quack.cli.reindex",
+        lambda _root, progress=None: {"files": 0, "folder_indexes": 0},
+    )
+
+    assert main(["init", str(root)]) == 0
+
+    out = capsys.readouterr().out
+    assert "configured custom embeddings (dim 4)" in out
+    config = yaml.safe_load((root / ".quack" / "config.yaml").read_text())
+    assert config["embed"]["command"] == f"{sys.executable} {script}"
+    assert config["embed"]["dim"] == 4
+    assert config["embed"]["include_body"] is True
+
+
+def test_init_embedding_setup_failure_does_not_fail_init(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "space"
+    script = tmp_path / "embedder.py"
+    script.write_text("print('not json')\n")
+    answers = iter(["y", "y", "y", f"{sys.executable} {script}"])
+    monkeypatch.setenv("QUACK_NO_ANIM", "1")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(builtins, "input", lambda _prompt: next(answers))
+    monkeypatch.setattr("quack.cli.run_setup", lambda _root: None)
+    monkeypatch.setattr(
+        "quack.cli.reindex",
+        lambda _root, progress=None: {"files": 0, "folder_indexes": 0},
+    )
+
+    assert main(["init", str(root)]) == 0
+
+    out = capsys.readouterr().out
+    assert "embeddings: skipped" in out
+    assert (root / ".quack" / "config.yaml").exists()
 
 
 def test_init_preserves_existing_config_without_prompting(tmp_path, capsys, monkeypatch):
@@ -269,7 +318,12 @@ def test_write_config_preserves_existing_defaults(tmp_path):
 
     data = yaml.safe_load(config.read_text())
     assert data["ai"] == {"command": "new", "timeout": 9, "skip": True}
-    assert data["embed"] == {"command": "embed", "dim": 3, "timeout": 4}
+    assert data["embed"] == {
+        "command": "embed",
+        "dim": 3,
+        "timeout": 4,
+        "include_body": True,
+    }
     assert data["defaults"] == {
         "search_limit": 4,
         "file_char_limit": 123,

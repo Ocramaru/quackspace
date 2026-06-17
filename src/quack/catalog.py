@@ -28,6 +28,7 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 
 import duckdb
@@ -35,7 +36,63 @@ import duckdb
 from .core import Space, find_root
 
 DB_NAME = "quack.duckdb"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+EMBED_BODY_CHAR_LIMIT = 4_000
+BODYLESS_EMBED_TAGS = {"assets", "data", "dependencies", "lockfile"}
+BODYLESS_EMBED_EXTENSIONS = {
+    "ai",
+    "avif",
+    "bmp",
+    "csv",
+    "db",
+    "duckdb",
+    "gif",
+    "gz",
+    "ico",
+    "jpeg",
+    "jpg",
+    "jsonl",
+    "log",
+    "mp3",
+    "mp4",
+    "parquet",
+    "pdf",
+    "png",
+    "sqlite",
+    "sqlite3",
+    "svg",
+    "tar",
+    "tsv",
+    "webp",
+    "woff",
+    "woff2",
+    "xls",
+    "xlsx",
+    "zip",
+}
+
+
+def embeds_body(entry) -> bool:
+    """Whether semantic embeddings should include raw file content."""
+    if entry.is_binary or not entry.body:
+        return False
+    if entry.ext in BODYLESS_EMBED_EXTENSIONS:
+        return False
+    if BODYLESS_EMBED_TAGS.intersection(entry.tags):
+        return False
+    return True
+
+
+def embed_body_text(entry) -> str:
+    """Bound raw file content included in semantic embeddings."""
+    if not embeds_body(entry):
+        return ""
+    if len(entry.body) <= EMBED_BODY_CHAR_LIMIT:
+        return entry.body
+    return (
+        entry.body[:EMBED_BODY_CHAR_LIMIT]
+        + f"\n\n[quack: body truncated at {EMBED_BODY_CHAR_LIMIT} characters]"
+    )
 
 
 def resolve_db(explicit_root: str | None = None) -> Path:
@@ -47,6 +104,88 @@ def resolve_db(explicit_root: str | None = None) -> Path:
 
 def db_path(space: Space) -> Path:
     return space.root / ".quack" / DB_NAME
+
+
+def file_embed_text(entry, *, include_body: bool = True) -> str:
+    """The file text surface used for semantic embeddings."""
+    parts = [
+        f"path: {entry.rel}",
+        f"name: {entry.name}",
+        f"folder: {entry.folder or '.'}",
+        f"type: {entry.ext or 'file'}",
+    ]
+    if entry.tags:
+        parts.append(f"tags: {', '.join(entry.tags)}")
+    if entry.description:
+        parts.append(f"description: {entry.description}")
+    if entry.links:
+        parts.append(f"links: {', '.join(entry.links[:25])}")
+    body = embed_body_text(entry) if include_body else ""
+    if body:
+        parts.append(f"body:\n{body}")
+    return "\n".join(parts).strip()
+
+
+def text_hash(text: str) -> str:
+    return sha256(text.encode("utf-8")).hexdigest()
+
+
+def file_embed_source_hash(entry, *, include_body: bool = True) -> str:
+    return text_hash(file_embed_text(entry, include_body=include_body))
+
+
+def embed_cache_hash(source_hash: str, command: str) -> str:
+    """Hash a catalog source hash with embedding-command identity."""
+    return sha256(f"{command}\0{source_hash}".encode("utf-8")).hexdigest()
+
+
+def folder_embed_text(info, by_folder: dict, kids_by_parent: dict) -> str:
+    """The folder text surface used for semantic embeddings."""
+    parts: list[str] = [
+        f"folder: {info.rel}",
+        f"name: {info.name}",
+        f"parent: {info.parent or '.'}",
+        f"files: {info.n_files}",
+    ]
+    if info.description:
+        parts.append(f"description: {info.description}")
+    if info.tags:
+        parts.append(f"tags: {', '.join(info.tags)}")
+    if info.types:
+        parts.append(
+            "types: "
+            + ", ".join(f"{ext}={count}" for ext, count in sorted(info.types.items()))
+        )
+    if info.tag_rollup:
+        parts.append(f"child tags: {', '.join(info.tag_rollup)}")
+    files = sorted(by_folder.get(info.rel, []), key=lambda e: e.name.lower())
+    child_lines = []
+    for e in files[:50]:
+        label = f"file {e.name}"
+        if e.ext:
+            label += f".{e.ext}"
+        child_lines.append(f"{label}: {e.description}" if e.description else label)
+    for c in kids_by_parent.get(info.rel, []):
+        child_lines.append(
+            f"folder {c.name}/: {c.description}" if c.description else f"folder {c.name}/"
+        )
+    if child_lines:
+        parts.append("children:\n" + "\n".join(child_lines))
+    return "\n".join(parts).strip()
+
+
+def folder_embed_source_hashes(space: Space, folder_infos: dict) -> dict[str, str]:
+    from . import folders as _folders
+
+    by_folder: dict[str, list] = defaultdict(list)
+    for e in space.entries:
+        by_folder[e.folder].append(e)
+    kids_by_parent = _folders.children_index(folder_infos)
+    return {
+        i.rel: text_hash(folder_embed_text(i, by_folder, kids_by_parent))
+        for i in folder_infos.values()
+        if not i.is_root
+    }
 
 
 def _insert_rows(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple]) -> None:
@@ -85,11 +224,13 @@ def build(
         folder_infos = _folders.resolve_folders(space)
 
     path = db_path(space)
+    backup_path: Path | None = None
     # Close any cached read-only connection first: DuckDB won't open a
     # read-write connection while a read-only one to the same file is live.
     invalidate(path)
     if path.exists():
-        path.unlink()  # rebuild clean; the files + .index.yaml are the truth
+        backup_path = path.with_name(f"{path.name}.prev-{time.time_ns()}")
+        path.replace(backup_path)  # rebuild clean; source files + indexes are truth
 
     names = set(space.by_name)
     inbound: dict[str, int] = defaultdict(int)
@@ -104,18 +245,24 @@ def build(
     for e in space.entries:
         n_in = inbound.get(e.name, 0)
         body = e.body if store_body else ""
+        embed_source_hash = file_embed_source_hash(e)
         file_rows.append((
             e.name, e.rel, e.folder, e.ext, e.name,
             e.description, ",".join(e.tags),
             len(e.links), n_in, n_in == 0 and len(e.links) == 0,
             e.is_binary, e.modified, e.described_at, e.stale, body,
+            embed_source_hash,
         ))
         tag_rows.extend((e.name, tag) for tag in e.tags)
         link_rows.extend((e.name, dst, dst in names) for dst in e.links)
 
     # One row per folder (excluding the root); parent "" means the root.
+    folder_hashes = folder_embed_source_hashes(space, folder_infos)
     folder_rows = [
-        (i.rel, i.parent, i.description, i.n_files, i.diagram, i.described_at)
+        (
+            i.rel, i.parent, i.description, i.n_files, i.diagram, i.described_at,
+            folder_hashes.get(i.rel, ""),
+        )
         for i in folder_infos.values()
         if not i.is_root
     ]
@@ -133,12 +280,15 @@ def build(
         _insert_rows(con, "links", link_rows)
         con.execute("COMMIT")
         _build_fts(con)
+        _restore_embedding_tables(con, backup_path)
         n_files = con.execute("SELECT count(*) FROM files").fetchone()[0]
         n_folders = con.execute("SELECT count(*) FROM folders").fetchone()[0]
         n_tags = con.execute("SELECT count(*) FROM tags").fetchone()[0]
         n_links = con.execute("SELECT count(*) FROM links").fetchone()[0]
     finally:
         con.close()
+        if backup_path is not None and backup_path.exists():
+            backup_path.unlink()
 
     invalidate(path)  # any cached read-only connection now points to a stale file
     return {
@@ -148,6 +298,40 @@ def build(
         "tags": n_tags,
         "links": n_links,
     }
+
+
+def _restore_embedding_tables(
+    con: duckdb.DuckDBPyConnection, backup_path: Path | None
+) -> None:
+    """Carry derived embedding caches across a full catalog rebuild.
+
+    The core catalog is still regenerated from source files and ``.index.yaml``.
+    Embeddings are copied back as a cache so the next ``quack embed`` can use
+    source hashes to refresh only stale rows instead of starting from zero.
+    """
+    if backup_path is None or not backup_path.exists():
+        return
+    db = str(backup_path).replace("'", "''")
+    con.execute(f"ATTACH '{db}' AS old_catalog;")
+    try:
+        tables = {
+            row[0]
+            for row in con.execute(
+                """
+                SELECT table_name
+                FROM duckdb_tables()
+                WHERE database_name = 'old_catalog'
+                  AND schema_name = 'main'
+                """
+            ).fetchall()
+        }
+        for table in ("embeddings", "folder_embeddings", "embedding_runs"):
+            if table in tables:
+                con.execute(
+                    f"CREATE TABLE {table} AS SELECT * FROM old_catalog.{table};"
+                )
+    finally:
+        con.execute("DETACH old_catalog;")
 
 
 def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
@@ -167,21 +351,26 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
     con = duckdb.connect(str(path))
     try:
         stored = {
-            rel: (tags_csv or "", da or "", fm or "")
-            for rel, tags_csv, da, fm in con.execute(
-                "SELECT rel, tags_csv, described_at, file_modified FROM files"
+            rel: (tags_csv or "", da or "", fm or "", source_hash or "")
+            for rel, tags_csv, da, fm, source_hash in con.execute(
+                "SELECT rel, tags_csv, described_at, file_modified, embed_source_hash FROM files"
             ).fetchall()
         }
         # One transaction for all writes (see build(): per-statement commits are
         # ~8x slower than batching them).
         con.execute("BEGIN TRANSACTION")
         for e in space.entries:
-            current = (",".join(e.tags), e.described_at, e.modified)
+            current = (
+                ",".join(e.tags),
+                e.described_at,
+                e.modified,
+                file_embed_source_hash(e),
+            )
             if stored.get(e.rel) != current:
                 con.execute(
                     "UPDATE files SET tags_csv = ?, described_at = ?, "
-                    "file_modified = ?, stale = ? WHERE rel = ?",
-                    [current[0], e.described_at, e.modified, e.stale, e.rel],
+                    "file_modified = ?, embed_source_hash = ?, stale = ? WHERE rel = ?",
+                    [current[0], e.described_at, e.modified, current[3], e.stale, e.rel],
                 )
 
         # tags and folders aren't full-text indexed, so rebuilding them wholesale
@@ -191,8 +380,12 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
         _insert_rows(con, "tags", tag_rows)
 
         con.execute("DELETE FROM folders;")
+        folder_hashes = folder_embed_source_hashes(space, folder_infos)
         folder_rows = [
-            (i.rel, i.parent, i.description, i.n_files, i.diagram, i.described_at)
+            (
+                i.rel, i.parent, i.description, i.n_files, i.diagram, i.described_at,
+                folder_hashes.get(i.rel, ""),
+            )
             for i in folder_infos.values()
             if not i.is_root
         ]
@@ -234,7 +427,8 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             file_modified VARCHAR,
             described_at  VARCHAR,
             stale         BOOLEAN,
-            body        VARCHAR
+            body        VARCHAR,
+            embed_source_hash VARCHAR
         );
         CREATE TABLE folders (
             folder      VARCHAR,
@@ -242,7 +436,8 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             description VARCHAR,
             n_files     INTEGER,
             diagram     VARCHAR,
-            described_at VARCHAR
+            described_at VARCHAR,
+            embed_source_hash VARCHAR
         );
         CREATE TABLE tags  (name VARCHAR, tag VARCHAR);
         CREATE TABLE links (src VARCHAR, dst VARCHAR, dst_exists BOOLEAN);
