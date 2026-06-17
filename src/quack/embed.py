@@ -247,7 +247,9 @@ def run_embed_setup(
         (),
         {
             "command": command,
+            "provider": selected_provider,
             "timeout": timeout,
+            "include_body": True,
             "uses_stdin": "{text}" not in command,
         },
     )()

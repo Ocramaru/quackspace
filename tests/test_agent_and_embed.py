@@ -103,6 +103,7 @@ def test_embed_init_command_validates_and_writes_config(tmp_path, capsys):
     assert config["embed"]["command"] == f"{sys.executable} {script}"
     assert config["embed"]["provider"] == "custom"
     assert config["embed"]["dim"] == 3
+    assert config["embed"]["include_body"] is True
 
 
 def test_embed_command_flag_implies_setup(tmp_path, capsys):
@@ -125,6 +126,7 @@ def test_embed_command_flag_implies_setup(tmp_path, capsys):
     config = yaml.safe_load((root / ".quack" / "config.yaml").read_text())
     assert config["embed"]["provider"] == "custom"
     assert config["embed"]["dim"] == 2
+    assert config["embed"]["include_body"] is True
 
 
 def test_embed_init_rejects_invalid_command_without_writing(tmp_path):
@@ -146,6 +148,7 @@ def test_embed_init_rejects_invalid_command_without_writing(tmp_path):
     config = yaml.safe_load((root / ".quack" / "config.yaml").read_text())
     assert config["embed"]["command"] == "quack embed text"
     assert config["embed"]["provider"] == "builtin"
+    assert config["embed"]["include_body"] is True
 
 
 def test_embed_not_configured_cli_points_to_init(tmp_path, capsys):
@@ -200,6 +203,7 @@ def test_embed_setup_noninteractive_uses_builtin_default(tmp_path, monkeypatch, 
     assert config["embed"]["command"] == DEFAULT_EMBED_COMMAND
     assert config["embed"]["provider"] == "builtin"
     assert config["embed"]["dim"] == 256
+    assert config["embed"]["include_body"] is True
 
 
 def test_embed_setup_ollama_provider_can_pull(tmp_path, monkeypatch):
@@ -229,6 +233,7 @@ def test_embed_setup_ollama_provider_can_pull(tmp_path, monkeypatch):
         "command": OLLAMA_EMBED_COMMAND,
         "dim": 3,
         "timeout": 9,
+        "include_body": True,
         "skip": False,
     }
 
@@ -253,6 +258,7 @@ def test_embed_setup_interactive_defaults_to_ollama(tmp_path, monkeypatch):
     config = yaml.safe_load((root / ".quack" / "config.yaml").read_text())
     assert config["embed"]["provider"] == "ollama"
     assert config["embed"]["command"] == OLLAMA_EMBED_COMMAND
+    assert config["embed"]["include_body"] is True
     assert config["embed"]["dim"] == 2
 
 

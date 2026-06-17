@@ -186,6 +186,7 @@ def test_init_interactive_can_setup_embeddings_without_building(tmp_path, capsys
     config = yaml.safe_load((root / ".quack" / "config.yaml").read_text())
     assert config["embed"]["command"] == f"{sys.executable} {script}"
     assert config["embed"]["dim"] == 4
+    assert config["embed"]["include_body"] is True
 
 
 def test_init_embedding_setup_failure_does_not_fail_init(tmp_path, capsys, monkeypatch):
@@ -317,7 +318,12 @@ def test_write_config_preserves_existing_defaults(tmp_path):
 
     data = yaml.safe_load(config.read_text())
     assert data["ai"] == {"command": "new", "timeout": 9, "skip": True}
-    assert data["embed"] == {"command": "embed", "dim": 3, "timeout": 4}
+    assert data["embed"] == {
+        "command": "embed",
+        "dim": 3,
+        "timeout": 4,
+        "include_body": True,
+    }
     assert data["defaults"] == {
         "search_limit": 4,
         "file_char_limit": 123,
