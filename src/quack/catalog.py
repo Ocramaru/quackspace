@@ -224,13 +224,12 @@ def build(
         folder_infos = _folders.resolve_folders(space)
 
     path = db_path(space)
-    backup_path: Path | None = None
-    # Close any cached read-only connection first: DuckDB won't open a
-    # read-write connection while a read-only one to the same file is live.
-    invalidate(path)
-    if path.exists():
-        backup_path = path.with_name(f"{path.name}.prev-{time.time_ns()}")
-        path.replace(backup_path)  # rebuild clean; source files + indexes are truth
+    # Write to a sibling temp file so the live catalog is never partially
+    # written.  Readers (including a running quack-mcp) keep their file
+    # descriptor on the old inode while we build; the atomic rename below
+    # makes the new catalog visible in one syscall.
+    tmp_path = path.with_name(f"{path.name}.build-{time.time_ns()}")
+    old_path: Path | None = path if path.exists() else None
 
     names = set(space.by_name)
     inbound: dict[str, int] = defaultdict(int)
@@ -267,7 +266,7 @@ def build(
         if not i.is_root
     ]
 
-    con = duckdb.connect(str(path))
+    con = duckdb.connect(str(tmp_path))
     try:
         _create_schema(con)
         _write_metadata(con, store_body=store_body)
@@ -280,17 +279,24 @@ def build(
         _insert_rows(con, "links", link_rows)
         con.execute("COMMIT")
         _build_fts(con)
-        _restore_embedding_tables(con, backup_path)
+        _restore_embedding_tables(con, old_path)
         n_files = con.execute("SELECT count(*) FROM files").fetchone()[0]
         n_folders = con.execute("SELECT count(*) FROM folders").fetchone()[0]
         n_tags = con.execute("SELECT count(*) FROM tags").fetchone()[0]
         n_links = con.execute("SELECT count(*) FROM links").fetchone()[0]
-    finally:
+    except:
         con.close()
-        if backup_path is not None and backup_path.exists():
-            backup_path.unlink()
+        tmp_path.unlink(missing_ok=True)
+        raise
+    else:
+        con.close()
 
-    invalidate(path)  # any cached read-only connection now points to a stale file
+    # Close the in-process cache before the rename so the next read_cursor()
+    # call opens the new inode.  A separate quack-mcp process keeps its old
+    # fd valid until its next query, when stat_signature() detects the change.
+    invalidate(path)
+    tmp_path.replace(path)
+
     return {
         "db": str(path),
         "files": n_files,
@@ -301,7 +307,7 @@ def build(
 
 
 def _restore_embedding_tables(
-    con: duckdb.DuckDBPyConnection, backup_path: Path | None
+    con: duckdb.DuckDBPyConnection, old_path: Path | None
 ) -> None:
     """Carry derived embedding caches across a full catalog rebuild.
 
@@ -309,10 +315,12 @@ def _restore_embedding_tables(
     Embeddings are copied back as a cache so the next ``quack embed`` can use
     source hashes to refresh only stale rows instead of starting from zero.
     """
-    if backup_path is None or not backup_path.exists():
+    if old_path is None or not old_path.exists():
         return
-    db = str(backup_path).replace("'", "''")
-    con.execute(f"ATTACH '{db}' AS old_catalog;")
+    db = str(old_path).replace("'", "''")
+    # READ_ONLY lets us attach the live catalog file even while a quack-mcp
+    # process holds a read-only fd on it (multiple read-only opens are allowed).
+    con.execute(f"ATTACH '{db}' AS old_catalog (READ_ONLY);")
     try:
         tables = {
             row[0]
@@ -348,7 +356,17 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
 
     path = db_path(space)
     invalidate(path)  # free any cached read-only connection before writing
-    con = duckdb.connect(str(path))
+    try:
+        con = duckdb.connect(str(path))
+    except duckdb.IOException as exc:
+        msg = str(exc)
+        if "lock" in msg.lower() or "already open" in msg.lower() or "could not" in msg.lower():
+            raise RuntimeError(
+                f"Cannot open {path} for writing — another process is holding a "
+                "read lock (quack-mcp?). Run reindex from within the MCP tool, "
+                "or stop the MCP server first and retry."
+            ) from exc
+        raise
     try:
         stored = {
             rel: (tags_csv or "", da or "", fm or "", source_hash or "")
