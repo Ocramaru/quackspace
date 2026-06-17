@@ -61,21 +61,102 @@ TEXT_BODY_MAX_BYTES = 1_000_000
 IGNORE_FILE = ".quackignore"
 
 
-def load_ignores(root: Path) -> set[str]:
-    """Built-in ignores plus any names/globs in the root's `.quackignore`.
+class IgnoreRuleset:
+    """Ordered ignore rules with gitignore-style semantics.
 
-    One entry per line; blank lines and `#` comments are skipped. Entries are
-    matched against each directory/file *name* (and full relative path) during
-    the walk, so both `node_modules` and `drafts/scratch` work.
+    Rules are evaluated in file order; the last matching rule wins. Negation
+    rules (``!pattern``) flip a prior match to re-include the file — this lets
+    users make exceptions inside an otherwise-ignored subtree.
+
+    Pattern matching follows gitignore conventions:
+      - ``pattern``          — match the *basename* of any file or directory
+      - ``dir/file``         — match the *full path* relative to the workspace root
+      - ``/pattern``         — root-anchored: only match at the top level
+      - ``!pattern``         — negation: re-include something a prior rule excluded
+      - Globs (``*``, ``?``, ``[…]``) are supported in all positions via fnmatch.
+
+    Built-in defaults (hidden dirs, caches) are held in a separate set and are
+    checked before user rules so negation cannot override them.
     """
-    ignores = set(DEFAULT_IGNORED_DIRS)
+
+    __slots__ = ("_builtins", "_rules")
+
+    def __init__(
+        self,
+        builtins: "set[str]",
+        rules: "list[tuple[str, bool, bool, bool]]",
+    ) -> None:
+        # builtins: names checked as-is (no glob, no negation, not overridable)
+        self._builtins = builtins
+        # rules: (pattern, negation, anchored, path_like)
+        self._rules = rules
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def build(cls, builtins: "set[str]", lines: "list[str]") -> "IgnoreRuleset":
+        """Parse .quackignore lines into an ordered ruleset."""
+        rules: list[tuple[str, bool, bool, bool]] = []
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            negation = line.startswith("!")
+            if negation:
+                line = line[1:].strip()
+            line = line.rstrip("/")  # trailing slash = dir-only hint; not enforced
+            anchored = line.startswith("/")
+            if anchored:
+                line = line[1:]
+            if not line:
+                continue
+            path_like = "/" in line
+            rules.append((line, negation, anchored, path_like))
+        return cls(builtins, rules)
+
+    # ------------------------------------------------------------------
+    # Matching
+    # ------------------------------------------------------------------
+
+    def is_ignored(self, name: str, rel: str) -> bool:
+        """True if this file/directory should be skipped by the walker."""
+        from fnmatch import fnmatch
+
+        if name in self._builtins:
+            return True
+
+        result = False
+        for pat, negation, anchored, path_like in self._rules:
+            if anchored:
+                # /pattern: rel must equal pat or start with pat/
+                hit = rel == pat or rel.startswith(pat + "/") or fnmatch(rel, pat)
+            elif path_like:
+                # contains /: match against the full relative path
+                hit = rel == pat or fnmatch(rel, pat)
+            else:
+                # plain name or glob: match basename anywhere (and full path)
+                hit = name == pat or fnmatch(name, pat) or fnmatch(rel, pat)
+
+            if hit:
+                result = not negation  # negation flips: True→False (re-include)
+
+        return result
+
+
+def load_ignores(root: Path) -> IgnoreRuleset:
+    """Built-in ignores plus ordered rules from the root's ``.quackignore``.
+
+    Supports the full gitignore pattern vocabulary: plain names, path patterns,
+    root-anchored ``/pattern``, globs, and negation ``!pattern`` for exceptions.
+    Built-in noise dirs (caches, hidden quack dirs) cannot be negated.
+    """
+    lines: list[str] = []
     f = root / IGNORE_FILE
     if f.exists():
-        for line in f.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#"):
-                ignores.add(line.rstrip("/"))
-    return ignores
+        lines = f.read_text().splitlines()
+    return IgnoreRuleset.build(DEFAULT_IGNORED_DIRS, lines)
 
 # [[wikilink]] or [[wikilink|alias]] or [[note#heading]]. We keep only the
 # note target (strip alias and heading).
@@ -285,17 +366,7 @@ def load_entry(path: Path, root: Path) -> Entry:
     return Entry(path=path, root=root, body=body, is_binary=is_binary)
 
 
-def _ignored(name: str, rel: str, patterns: set[str]) -> bool:
-    """True if a name or its root-relative path matches any ignore pattern."""
-    from fnmatch import fnmatch
-
-    for pat in patterns:
-        if name == pat or rel == pat or fnmatch(name, pat) or fnmatch(rel, pat):
-            return True
-    return False
-
-
-def _level(base: Path, dirnames: list[str], root: Path, patterns: set[str]):
+def _level(base: Path, dirnames: list[str], root: Path, patterns: IgnoreRuleset):
     """One os.walk level → (folders_to_record, dirs_to_descend). Shared by
     :func:`walk` and :func:`count_indexable` so pruning can't diverge: ignored
     dirs are hidden; opaque dirs are recorded as folders but not descended."""
@@ -303,7 +374,7 @@ def _level(base: Path, dirnames: list[str], root: Path, patterns: set[str]):
     descend: list[str] = []
     for d in sorted(dirnames):
         rel = (base / d).relative_to(root).as_posix()
-        if _ignored(d, rel, patterns):
+        if patterns.is_ignored(d, rel):
             continue
         record.append(base / d)
         if d not in DEFAULT_OPAQUE_DIRS:
@@ -311,9 +382,9 @@ def _level(base: Path, dirnames: list[str], root: Path, patterns: set[str]):
     return record, descend
 
 
-def _keep_file(fn: str, rel: str, patterns: set[str]) -> bool:
+def _keep_file(fn: str, rel: str, patterns: IgnoreRuleset) -> bool:
     """True if a file should be indexed (not a generated artifact / not ignored)."""
-    return not (fn in GENERATED_FILES or _ignored(fn, rel, patterns))
+    return not (fn in GENERATED_FILES or patterns.is_ignored(fn, rel))
 
 
 # Below this many files, the thread-pool overhead isn't worth it; load inline.
@@ -353,7 +424,7 @@ def _load_entries(
 
 def walk(
     root: Path,
-    ignores: set[str] | None = None,
+    ignores: "IgnoreRuleset | None" = None,
     on_file: "Callable[[Entry], None] | None" = None,
 ) -> tuple[list[Entry], list[Path]]:
     """One filesystem pass → (entries, folders).
@@ -382,7 +453,7 @@ def walk(
 
 def count_indexable(
     root: Path,
-    ignores: set[str] | None = None,
+    ignores: "IgnoreRuleset | None" = None,
     progress: "Callable[[int, int | None, str], None] | None" = None,
 ) -> int:
     """Count the files :func:`walk` would index, without reading any of them.
@@ -415,7 +486,7 @@ _META_MARKERS = (".index.yaml", ".folder.md")
 
 def scan_signature(
     root: Path,
-    ignores: set[str] | None = None,
+    ignores: "IgnoreRuleset | None" = None,
     progress: "Callable[[int, int, str], None] | None" = None,
 ) -> tuple[dict[str, str], set[str], int]:
     """Stat-only change signature — no file reads, no parsing.
@@ -462,7 +533,7 @@ def scan_signature(
     return files, folders, newest_marker_ns
 
 
-def iter_files(root: Path, ignores: set[str] | None = None):
+def iter_files(root: Path, ignores: "IgnoreRuleset | None" = None):
     """Yield every non-ignored file in the root. Thin wrapper over :func:`walk`
     for callers that only need files."""
     yield from walk(root, ignores)[0]

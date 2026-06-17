@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from quack.core import IgnoreRuleset
 from quack.gitignore import (
     BLOCK_HEADER,
     ensure_gitignore,
@@ -242,7 +243,7 @@ def test_find_descendant_git_roots_skips_configured_ignored_dirs(tmp_path):
 
     found, scanned, skipped = _find_descendant_git_roots(
         quack_root,
-        patterns={"node_modules"},
+        patterns=IgnoreRuleset.build({"node_modules"}, []),
         with_stats=True,
     )
 

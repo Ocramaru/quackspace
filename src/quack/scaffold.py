@@ -89,12 +89,22 @@ quack graph path A B           # shortest link path
 - Full conventions and details: `quack --help`, `quack mcp print`, and the project README.
 """
 
-ROOT_QUACKIGNORE = """# One pattern per line. Names or root-relative paths; globs allowed.
+ROOT_QUACKIGNORE = """# Gitignore-style rules, one per line. Quack evaluates them in order and the
+# last matching rule wins.
+#
+# Pattern types:
+#   name          — match this basename anywhere in the tree    (e.g. dist)
+#   /name         — root-anchored: only match at the top level  (e.g. /dist)
+#   dir/file      — path pattern relative to the workspace root (e.g. vendor/gen)
+#   *.glob        — shell glob applied to the basename          (e.g. *.lock)
+#   !pattern      — exception: re-include something previously excluded
+#
 # Handled automatically (no need to list):
 #   hidden entirely  — .quack, .git, .obsidian, .trash, and caches
 #                      (__pycache__, .mypy_cache, .pytest_cache, .ruff_cache)
 #   mentioned, not indexed — vendored/dependency trees (site-packages,
 #                      node_modules, .venv, venv, .tox, .eggs, bower_components)
+#
 # Build outputs are project-specific; ignore the ones you have (edit to taste):
 dist
 build
