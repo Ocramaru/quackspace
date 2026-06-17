@@ -285,7 +285,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--workers",
         type=int,
         default=None,
-        help="parallel embedding workers (default: min(cpu_count, 8)); use 1 to disable",
+        help="parallel embedding workers (default: auto for Ollama, otherwise up to 8); use 1 to disable",
+    )
+    p_embed.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="show full subprocess output on embedding errors",
     )
 
     p_mcp = sub.add_parser("mcp", help="MCP server for LLM tool access")
@@ -486,9 +491,16 @@ def _run_embed_provider_command(args) -> int:
             print(json.dumps(embed(text)))
             return 0
         if provider == "ollama":
+            from .embed import DEFAULT_AI_TIMEOUT, _ensure_ollama_server
             from .embed_ollama import DEFAULT_MODEL, embed
 
-            print(json.dumps(embed(text, model=args.model or DEFAULT_MODEL)))
+            try:
+                _ensure_ollama_server(DEFAULT_AI_TIMEOUT, out=sys.stderr)
+                vec = embed(text, model=args.model or DEFAULT_MODEL)
+            except RuntimeError as e:
+                print(f"✗ {e}", file=sys.stderr)
+                return 1
+            print(json.dumps(vec))
             return 0
         print(
             "`quack embed text` supports --provider builtin or --provider ollama.",
@@ -917,6 +929,18 @@ def _dispatch(argv: list[str] | None) -> int:
             print("or set `embed.command` in .quack/config.yaml.")
             print("The command must print one JSON array of floats.")
             return 1
+        except RuntimeError as e:
+            from .embed import EmbedSubprocessError
+            print(f"✗ {e}", file=sys.stderr)
+            if args.verbose and isinstance(e, EmbedSubprocessError):
+                print(f"  command: {' '.join(e.argv)}", file=sys.stderr)
+                if e.stdout.strip():
+                    print(f"  stdout:\n{e.stdout.rstrip()}", file=sys.stderr)
+                if e.stderr.strip():
+                    print(f"  stderr:\n{e.stderr.rstrip()}", file=sys.stderr)
+            elif not args.verbose:
+                print("  Run `quack embed --verbose` for full subprocess output.", file=sys.stderr)
+            return 1
         print(
             f"✓ embedded {result['embedded']:,} file(s) + "
             f"{result['folders']:,} folder(s) (dim {result['dim']})"
@@ -934,6 +958,17 @@ def _dispatch(argv: list[str] | None) -> int:
             )
         else:
             print("  refreshed: already up to date")
+        failed = result.get("failed", 0) + result.get("folders_failed", 0)
+        if failed:
+            print(
+                f"  skipped: {result.get('failed', 0):,} file(s), "
+                f"{result.get('folders_failed', 0):,} folder(s) failed to embed"
+            )
+            if args.verbose:
+                for item in result.get("failed_items", [])[:20]:
+                    print(f"    {item}")
+                if len(result.get("failed_items", [])) > 20:
+                    print(f"    ... {len(result['failed_items']) - 20:,} more")
         return 0
 
     if args.command == "init":

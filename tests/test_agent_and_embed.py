@@ -9,9 +9,12 @@ from quack.cli import main
 from quack.config import AIConfig, Config, EmbedConfig
 from quack.embed import (
     DEFAULT_EMBED_COMMAND,
+    EMBED_TEXT_CHAR_LIMIT,
     OLLAMA_EMBED_COMMAND,
     EmbedNotConfigured,
     _embed_text,
+    _embedding_input,
+    _embedding_worker_limits,
     build_embeddings,
     run_embed_setup,
     semantic_search,
@@ -405,6 +408,182 @@ def test_embed_ollama_text_subcommand_prints_json_vector(capsys, monkeypatch):
     ]) == 0
 
     assert json.loads(capsys.readouterr().out) == [12, 16]
+
+
+def test_ollama_embed_provider_uses_direct_api(monkeypatch):
+    from quack import embed as embed_mod
+    from quack import embed_ollama
+
+    def fail_run_cmd(*_args, **_kwargs):
+        raise AssertionError("ollama provider should not use subprocess embedding")
+
+    monkeypatch.setattr(embed_mod, "_run_cmd", fail_run_cmd)
+    monkeypatch.setattr(embed_ollama, "embed", lambda text, model: [len(text), len(model)])
+
+    cfg = EmbedConfig(
+        provider="ollama",
+        command="quack embed text --provider ollama --model nomic-embed-text",
+        timeout=10,
+    )
+
+    assert _embed_text(cfg, "body: search") == [12.0, 16.0]
+
+
+def test_embedding_input_is_capped_for_large_files():
+    text = "x" * (EMBED_TEXT_CHAR_LIMIT + 100)
+
+    capped = _embedding_input(text)
+
+    assert len(capped) < len(text)
+    assert capped.startswith("x" * EMBED_TEXT_CHAR_LIMIT)
+    assert "embedding input truncated" in capped
+
+
+def test_ollama_auto_workers_use_detected_limit(monkeypatch):
+    from quack import embed as embed_mod
+
+    monkeypatch.setattr(embed_mod, "_ollama_concurrency", lambda _model: (1, "CPU"))
+    cfg = EmbedConfig(
+        provider="ollama",
+        command="quack embed text --provider ollama --model nomic-embed-text",
+    )
+
+    assert _embedding_worker_limits(cfg, None) == (1, 1, "CPU")
+
+    monkeypatch.setattr(embed_mod, "_ollama_concurrency", lambda _model: (4, "GPU"))
+    assert _embedding_worker_limits(cfg, None) == (4, 4, "GPU")
+    assert _embedding_worker_limits(cfg, 3) == (3, 3, None)
+
+
+def test_embedding_text_omits_raw_body_for_data_and_assets(tmp_path):
+    from quack.catalog import file_embed_text
+    from quack.core import Space
+
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "data.csv").write_text("a,b\n1,2\n")
+    (root / "logo.svg").write_text("<svg><path d='M0 0'/></svg>\n")
+    space = Space.load(str(root))
+
+    csv = next(e for e in space.entries if e.rel == "data.csv")
+    svg = next(e for e in space.entries if e.rel == "logo.svg")
+
+    csv_text = file_embed_text(csv)
+    svg_text = file_embed_text(svg)
+
+    assert "type: csv" in csv_text
+    assert "tags: data, csv" in csv_text
+    assert "body:" not in csv_text
+    assert "type: svg" in svg_text
+    assert "body:" not in svg_text
+
+
+def test_embedding_text_caps_raw_body_for_source_files(tmp_path):
+    from quack.catalog import EMBED_BODY_CHAR_LIMIT, file_embed_text
+    from quack.core import Space
+
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "app.py").write_text("x" * (EMBED_BODY_CHAR_LIMIT + 100))
+    space = Space.load(str(root))
+    entry = next(e for e in space.entries if e.rel == "app.py")
+
+    text = file_embed_text(entry)
+
+    assert "body:\n" + ("x" * EMBED_BODY_CHAR_LIMIT) in text
+    assert "body truncated" in text
+    assert "x" * (EMBED_BODY_CHAR_LIMIT + 1) not in text
+
+
+def test_embed_include_body_false_omits_all_file_bodies(tmp_path):
+    from quack.catalog import file_embed_text
+    from quack.core import Space
+
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "app.py").write_text("secret body token\n")
+    space = Space.load(str(root))
+    entry = next(e for e in space.entries if e.rel == "app.py")
+
+    text = file_embed_text(entry, include_body=False)
+
+    assert "type: py" in text
+    assert "secret body token" not in text
+    assert "body:" not in text
+
+
+def test_config_loads_embed_include_body(tmp_path):
+    import yaml
+
+    root = scaffold_root(str(tmp_path / "space"))
+    cfg = root / ".quack" / "config.yaml"
+    data = yaml.safe_load(cfg.read_text())
+    data["embed"]["include_body"] = False
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    assert Config.load(str(root)).embed.include_body is False
+
+
+def test_embed_build_honors_include_body_false(tmp_path, monkeypatch):
+    import yaml
+
+    from quack import embed as embed_mod
+    from quack.indexer import reindex
+
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "app.py").write_text("secret body token\n")
+    reindex(str(root))
+
+    cfg = root / ".quack" / "config.yaml"
+    data = yaml.safe_load(cfg.read_text())
+    data["embed"] = {
+        "command": "test embedder",
+        "dim": 2,
+        "timeout": 10,
+        "include_body": False,
+    }
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    seen = []
+
+    def spy_embed(_cfg, text):
+        seen.append(text)
+        return [0.1, 0.2]
+
+    monkeypatch.setattr(embed_mod, "_embed_text", spy_embed)
+
+    build_embeddings(str(root), rebuild=True, workers=1)
+
+    file_texts = [text for text in seen if "path: app.py" in text]
+    assert file_texts
+    assert all("secret body token" not in text for text in file_texts)
+    assert all("body:" not in text for text in file_texts)
+
+
+def test_embed_build_skips_failed_items(tmp_path, monkeypatch):
+    import yaml
+
+    from quack import embed as embed_mod
+    from quack.indexer import reindex
+
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "good.md").write_text("good\n")
+    (root / "bad.md").write_text("bad\n")
+    reindex(str(root))
+
+    cfg = root / ".quack" / "config.yaml"
+    data = yaml.safe_load(cfg.read_text())
+    data["embed"] = {"command": "test embedder", "dim": 2, "timeout": 10}
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    def embed_or_fail(_cfg, text):
+        if "bad" in text:
+            raise RuntimeError("bad input")
+        return [0.1, 0.2]
+
+    monkeypatch.setattr(embed_mod, "_embed_text", embed_or_fail)
+
+    summary = build_embeddings(str(root), rebuild=True, workers=1)
+
+    assert summary["updated"] == 1
+    assert summary["failed"] == 1
 
 
 def test_embed_refresh_skips_unchanged_updates_stale_and_prunes_deleted(tmp_path):

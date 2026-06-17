@@ -44,6 +44,7 @@ from .subprocess_utils import failure_message
 DEFAULT_EMBED_COMMAND = "quack embed text"
 OLLAMA_MODEL = "nomic-embed-text"
 OLLAMA_EMBED_COMMAND = f"quack embed text --provider ollama --model {OLLAMA_MODEL}"
+EMBED_TEXT_CHAR_LIMIT = 20_000
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,25 @@ EMBED_PROVIDER_CHOICES = tuple(EMBED_PROVIDERS) + ("custom",)
 
 class EmbedNotConfigured(Exception):
     """No embedding command set in config."""
+
+
+class EmbedSubprocessError(RuntimeError):
+    """Subprocess embedding command returned non-zero; carries raw output for --verbose."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        argv: list[str],
+        returncode: int,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        super().__init__(message)
+        self.argv = argv
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 EMBED_EXPLAINER = (
@@ -129,19 +149,58 @@ def _run_cmd(
 
 
 def _embed_text(cfg, text: str) -> list[float]:
+    if cfg.provider == "ollama":
+        from .embed_ollama import embed
+
+        return embed(text, model=_ollama_model_from_command(cfg.command))
+
     argv = shlex.split(cfg.command)
     if not cfg.uses_stdin:
         argv = [part.replace("{text}", text) for part in argv]
     stdin = text if cfg.uses_stdin else None
     proc = _run_cmd(argv, stdin_text=stdin, timeout=cfg.timeout, kind="Embedding")
     if proc.returncode != 0:
-        raise RuntimeError(
-            failure_message("Embedding", argv, proc.returncode, proc.stdout, proc.stderr)
+        raise EmbedSubprocessError(
+            failure_message("Embedding", argv, proc.returncode, proc.stdout, proc.stderr),
+            argv=argv,
+            returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
         )
     vec = json.loads(proc.stdout)
     if not isinstance(vec, list) or not vec:
         raise RuntimeError("Embedding command did not return a non-empty JSON array.")
     return [float(x) for x in vec]
+
+
+def _ollama_model_from_command(command: str) -> str:
+    parts = shlex.split(command) if command else []
+    try:
+        return parts[parts.index("--model") + 1]
+    except (ValueError, IndexError):
+        return OLLAMA_MODEL
+
+
+def _embedding_input(text: str) -> str:
+    if len(text) <= EMBED_TEXT_CHAR_LIMIT:
+        return text
+    return (
+        text[:EMBED_TEXT_CHAR_LIMIT]
+        + f"\n\n[quack: embedding input truncated at {EMBED_TEXT_CHAR_LIMIT} characters]"
+    )
+
+
+def _embedding_worker_limits(cfg, workers: int | None) -> tuple[int, int, str | None]:
+    """Return (initial, maximum, backend_label) for embedding concurrency."""
+    if workers is not None:
+        n = max(1, min(workers, 8))
+        return n, n, None
+    if cfg.provider == "ollama":
+        n, backend_label = _ollama_concurrency(_ollama_model_from_command(cfg.command))
+        n = max(1, min(n, 8))
+        return n, n, backend_label
+    n = min(os.cpu_count() or 4, 8)
+    return n, 8, None
 
 
 def run_embed_setup(
@@ -286,15 +345,48 @@ def _pull_ollama_model(model: str, timeout: int) -> None:
 
 
 def _ollama_server_ready() -> bool:
-    try:
-        req = urllib.request.Request("http://127.0.0.1:11434/", method="HEAD")
-        with urllib.request.urlopen(req, timeout=1):
-            return True
-    except (OSError, urllib.error.URLError):
-        return False
+    for host in ("127.0.0.1", "[::1]"):
+        try:
+            req = urllib.request.Request(f"http://{host}:11434/", method="HEAD")
+            with urllib.request.urlopen(req, timeout=1):
+                return True
+        except (OSError, urllib.error.URLError):
+            continue
+    return False
 
 
-def _ensure_ollama_server(timeout: int) -> None:
+def _ollama_concurrency(model: str) -> tuple[int, str]:
+    """Return (workers, label) based on whether Ollama is running the model on GPU or CPU.
+
+    Queries /api/ps after the model is loaded (probe embed warms it up).
+    - GPU (size_vram > 0): up to 4 workers, GPU can pipeline requests.
+    - CPU (size_vram == 0): 1 worker to avoid memory pressure.
+    - Model not yet loaded / unreachable: 2 workers as a moderate default.
+    """
+    import json as _json
+
+    for host in ("127.0.0.1", "[::1]"):
+        try:
+            req = urllib.request.Request(f"http://{host}:11434/api/ps", method="GET")
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                data = _json.loads(resp.read().decode())
+            target = model.split(":")[0]
+            for entry in data.get("models", []):
+                if entry.get("name", "").split(":")[0] == target or entry.get("model", "").startswith(target):
+                    vram = entry.get("size_vram", 0)
+                    if vram > 0:
+                        return min(4, os.cpu_count() or 2), f"GPU ({vram // 1_000_000} MB VRAM)"
+                    return 1, "CPU"
+            return 2, "CPU (model not yet loaded)"
+        except (OSError, urllib.error.URLError, ValueError):
+            continue
+    return 2, "unknown"
+
+
+def _ensure_ollama_server(timeout: int, *, out=None) -> None:
+    import sys as _sys
+    if out is None:
+        out = _sys.stdout
     if _ollama_server_ready():
         return
     if not _ollama_binary_exists():
@@ -302,7 +394,7 @@ def _ensure_ollama_server(timeout: int) -> None:
             "Ollama is not installed or not in PATH. Install Ollama, or choose "
             "the built-in local embedder."
         )
-    print("Starting Ollama server...")
+    print("Starting Ollama server...", file=out)
     subprocess.Popen(
         ["ollama", "serve"],
         stdout=subprocess.DEVNULL,
@@ -312,7 +404,7 @@ def _ensure_ollama_server(timeout: int) -> None:
     deadline = time.monotonic() + min(max(timeout, 10), 30)
     while time.monotonic() < deadline:
         if _ollama_server_ready():
-            print("  Ollama server is running.")
+            print("  Ollama server is running.", file=out)
             return
         time.sleep(0.25)
     raise RuntimeError("Ollama server did not start. Run `ollama serve` and retry.")
@@ -386,13 +478,18 @@ def build_embeddings(
     ``workers`` controls how many embedding calls run in parallel. The default
     (None) picks ``min(cpu_count, 8)``. Set to 1 to disable parallelism.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait as cf_wait
 
     config = Config.load(explicit_root)
     if not config.embed.configured:
         raise EmbedNotConfigured()
     if timeout is not None:
         config.embed.timeout = timeout
+
+    provider_label = config.embed.provider or "custom"
+    if progress is not None:
+        progress(0, 1, f"Connecting to {provider_label} embeddings")
+
     space = Space.load(explicit_root)
     path = db_path(space)
     if not path.exists():
@@ -407,7 +504,7 @@ def build_embeddings(
     kids_by_parent = _folders.children_index(folder_infos)
     file_items = []
     for e in space.entries:
-        text = file_embed_text(e)
+        text = _embedding_input(file_embed_text(e, include_body=config.embed.include_body))
         source_hash = text_hash(text)
         file_items.append(
             (e.rel, e.name, embed_cache_hash(source_hash, config.embed.command), text)
@@ -416,7 +513,7 @@ def build_embeddings(
     for i in folder_infos.values():
         if i.is_root:
             continue
-        text = folder_embed_text(i, by_folder, kids_by_parent)
+        text = _embedding_input(folder_embed_text(i, by_folder, kids_by_parent))
         source_hash = text_hash(text)
         folder_items.append(
             (i.rel, i.parent, embed_cache_hash(source_hash, config.embed.command), text)
@@ -434,19 +531,24 @@ def build_embeddings(
         existing_dim = _existing_vector_dim(con)
         dim = config.embed.dim or existing_dim
 
-        # If dim is still unknown we need to embed one item to discover it.
-        # We probe file_items[0] (or folder_items[0]) regardless of the cache:
-        # if it turns out to be cached, the probe call is wasted — same trade-off
-        # as the pre-parallel code. If it isn't cached, we reuse the result.
+        # If dim is still unknown, probe until one item succeeds. A single bad
+        # file should not make the whole embedding run unusable.
         probe_key: tuple | None = None
         probe_vec: list[float] | None = None
         if not dim:
-            probe_text = (file_items[0][3] if file_items else
-                          (folder_items[0][3] if folder_items else ""))
-            if probe_text:
-                probe_vec = _embed_text(config.embed, probe_text)
+            probe_items = [("f", *item) for item in file_items] + [
+                ("d", *item) for item in folder_items
+            ]
+            for kind, rel, _name_or_parent, _source_hash, probe_text in probe_items:
+                if not probe_text:
+                    continue
+                try:
+                    probe_vec = _embed_text(config.embed, probe_text)
+                except Exception:
+                    continue
                 dim = len(probe_vec)
-                probe_key = ("f", file_items[0][0]) if file_items else ("d", folder_items[0][0])
+                probe_key = (kind, rel)
+                break
         if not dim:
             raise RuntimeError("Could not determine embedding dimension.")
 
@@ -485,11 +587,25 @@ def build_embeddings(
 
         n_todo = len(todo)
         total = n_todo + 3  # +3: two HNSW index steps + embedding_runs record
-        n_workers = min(workers or (os.cpu_count() or 4), 8)
+        n_workers, max_workers, backend_label = _embedding_worker_limits(config.embed, workers)
+        if backend_label is not None and progress is not None:
+            progress(0, total, f"Ollama {backend_label}, {n_workers} worker(s)")
         cfg = config.embed
 
         def _do_embed(item: tuple) -> tuple:
-            return item, _embed_text(cfg, item[4])
+            try:
+                return item, _embed_text(cfg, item[4]), None
+            except Exception as first_error:
+                if cfg.provider == "ollama":
+                    try:
+                        _ensure_ollama_server(timeout=cfg.timeout)
+                    except RuntimeError:
+                        pass
+                time.sleep(1)
+                try:
+                    return item, _embed_text(cfg, item[4]), None
+                except Exception as second_error:
+                    return item, None, str(second_error or first_error)
 
         # If the probed item is in the work queue, reuse the result so it isn't
         # embedded twice. Items not needing embedding are skipped above already.
@@ -498,6 +614,8 @@ def build_embeddings(
         )
         done_count = 0
         results: list[tuple] = []
+        failed_files = failed_folders = 0
+        failed_items: list[str] = []
 
         if probe_in_todo:
             # First item of todo is the probe item; seed results with its vector.
@@ -505,35 +623,68 @@ def build_embeddings(
                 item for item in todo
                 if item[0] == probe_key[0] and item[1] == probe_key[1]
             )
-            results.append((probe_item, probe_vec))
-            done_count = 1
-            if progress is not None:
-                label = probe_item[1] + ("/" if probe_item[0] == "d" else "")
-                progress(done_count, total, f"Embedded {label}")
+            if probe_vec is not None:
+                results.append((probe_item, probe_vec))
+                done_count = 1
+                if progress is not None:
+                    label = probe_item[1] + ("/" if probe_item[0] == "d" else "")
+                    progress(done_count, total, f"Embedded {label}")
             todo_remaining = [item for item in todo if not (item[0] == probe_key[0] and item[1] == probe_key[1])]
         else:
             todo_remaining = todo
 
-        # Embed in parallel: _embed_text is subprocess/HTTP only — no DuckDB
-        # access — so threads are safe and the GIL releases freely.
+        # Adaptive sliding-window concurrency: start at n_workers, ramp up by 1
+        # every RAMP_EVERY successes (up to MAX_WORKERS), back off by 2 on failure.
+        # Uses FIRST_COMPLETED wait so we control in-flight count dynamically.
         if todo_remaining:
-            if n_workers == 1 or len(todo_remaining) == 1:
-                for item in todo_remaining:
-                    done_count += 1
-                    if progress is not None:
-                        label = item[1] + ("/" if item[0] == "d" else "")
-                        progress(done_count, total, f"Embedding {label}")
-                    results.append(_do_embed(item))
-            else:
-                with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                    futures = {pool.submit(_do_embed, item): item for item in todo_remaining}
-                    for fut in as_completed(futures):
-                        item_result, vec = fut.result()  # re-raises on embedding error
-                        results.append((item_result, vec))
+            MAX_WORKERS = max_workers
+            RAMP_EVERY = 20
+            current_workers = n_workers
+            consecutive_ok = 0
+            in_flight: dict = {}
+            queue = iter(todo_remaining)
+            exhausted = False
+
+            def _fill(pool):
+                nonlocal exhausted
+                while len(in_flight) < current_workers and not exhausted:
+                    try:
+                        item = next(queue)
+                        in_flight[pool.submit(_do_embed, item)] = item
+                    except StopIteration:
+                        exhausted = True
+                        break
+
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                _fill(pool)
+                while in_flight:
+                    done, _ = cf_wait(in_flight, return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        in_flight.pop(fut)
+                        item_result, vec, error = fut.result()
                         done_count += 1
-                        if progress is not None:
-                            label = item_result[1] + ("/" if item_result[0] == "d" else "")
-                            progress(done_count, total, f"Embedded {label}")
+                        label = item_result[1] + ("/" if item_result[0] == "d" else "")
+                        if error is not None or vec is None:
+                            if item_result[0] == "f":
+                                failed_files += 1
+                            else:
+                                failed_folders += 1
+                            failed_items.append(label)
+                            current_workers = max(1, current_workers - 1)
+                            consecutive_ok = 0
+                            if progress is not None:
+                                progress(done_count, total, f"Skipped {label} ({current_workers}w)")
+                        else:
+                            results.append((item_result, vec))
+                            consecutive_ok += 1
+                            if consecutive_ok % RAMP_EVERY == 0 and current_workers < MAX_WORKERS:
+                                current_workers += 1
+                                worker_info = f"({current_workers}w↑)"
+                            else:
+                                worker_info = f"({current_workers}w)"
+                            if progress is not None:
+                                progress(done_count, total, f"Embedded {label} {worker_info}")
+                    _fill(pool)
 
         # Write all results to DuckDB sequentially in the main thread.
         updated_files = updated_folders = 0
@@ -606,6 +757,9 @@ def build_embeddings(
         "folders_updated": updated_folders,
         "folders_skipped": skipped_folders,
         "folders_deleted": deleted_folders,
+        "failed": failed_files,
+        "folders_failed": failed_folders,
+        "failed_items": failed_items,
     }
 
 

@@ -125,8 +125,10 @@ pass flags like `--diagrams`, `--catalog --map`, or `--all`.
   ships a free no-setup fallback (`quack embed text`), and you can choose
   `--provider custom --command "..."` with any command that prints a JSON array
   of floats. Files embed labeled path, name, folder, type, tags, links,
-  description, and body. Folders embed labeled path, description, type/tag
-  rollups, and direct child names/descriptions. Re-running `quack embed`
+  description, and a bounded body for source/prose files. Data and asset files
+  embed metadata only; set `embed.include_body: false` in `.quack/config.yaml`
+  to make all file embeddings metadata-only. Folders embed labeled path,
+  description, type/tag rollups, and direct child names/descriptions. Re-running `quack embed`
   refreshes missing or stale vectors and prunes deleted paths; use
   `quack embed --rebuild` to recreate the vector cache from scratch.
 

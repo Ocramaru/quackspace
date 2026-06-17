@@ -37,6 +37,62 @@ from .core import Space, find_root
 
 DB_NAME = "quack.duckdb"
 SCHEMA_VERSION = 3
+EMBED_BODY_CHAR_LIMIT = 4_000
+BODYLESS_EMBED_TAGS = {"assets", "data", "dependencies", "lockfile"}
+BODYLESS_EMBED_EXTENSIONS = {
+    "ai",
+    "avif",
+    "bmp",
+    "csv",
+    "db",
+    "duckdb",
+    "gif",
+    "gz",
+    "ico",
+    "jpeg",
+    "jpg",
+    "jsonl",
+    "log",
+    "mp3",
+    "mp4",
+    "parquet",
+    "pdf",
+    "png",
+    "sqlite",
+    "sqlite3",
+    "svg",
+    "tar",
+    "tsv",
+    "webp",
+    "woff",
+    "woff2",
+    "xls",
+    "xlsx",
+    "zip",
+}
+
+
+def embeds_body(entry) -> bool:
+    """Whether semantic embeddings should include raw file content."""
+    if entry.is_binary or not entry.body:
+        return False
+    if entry.ext in BODYLESS_EMBED_EXTENSIONS:
+        return False
+    if BODYLESS_EMBED_TAGS.intersection(entry.tags):
+        return False
+    return True
+
+
+def embed_body_text(entry) -> str:
+    """Bound raw file content included in semantic embeddings."""
+    if not embeds_body(entry):
+        return ""
+    if len(entry.body) <= EMBED_BODY_CHAR_LIMIT:
+        return entry.body
+    return (
+        entry.body[:EMBED_BODY_CHAR_LIMIT]
+        + f"\n\n[quack: body truncated at {EMBED_BODY_CHAR_LIMIT} characters]"
+    )
 
 
 def resolve_db(explicit_root: str | None = None) -> Path:
@@ -50,7 +106,7 @@ def db_path(space: Space) -> Path:
     return space.root / ".quack" / DB_NAME
 
 
-def file_embed_text(entry) -> str:
+def file_embed_text(entry, *, include_body: bool = True) -> str:
     """The file text surface used for semantic embeddings."""
     parts = [
         f"path: {entry.rel}",
@@ -64,8 +120,9 @@ def file_embed_text(entry) -> str:
         parts.append(f"description: {entry.description}")
     if entry.links:
         parts.append(f"links: {', '.join(entry.links[:25])}")
-    if entry.body:
-        parts.append(f"body:\n{entry.body}")
+    body = embed_body_text(entry) if include_body else ""
+    if body:
+        parts.append(f"body:\n{body}")
     return "\n".join(parts).strip()
 
 
@@ -73,8 +130,8 @@ def text_hash(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
 
 
-def file_embed_source_hash(entry) -> str:
-    return text_hash(file_embed_text(entry))
+def file_embed_source_hash(entry, *, include_body: bool = True) -> str:
+    return text_hash(file_embed_text(entry, include_body=include_body))
 
 
 def embed_cache_hash(source_hash: str, command: str) -> str:

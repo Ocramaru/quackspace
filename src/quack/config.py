@@ -87,6 +87,7 @@ class EmbedConfig:
     provider: str = ""
     dim: int = 0  # vector dimension; 0 = infer from first embedding
     timeout: int = DEFAULT_AI_TIMEOUT
+    include_body: bool = True
     skip: bool = False  # user opted out of embeddings; never prompt to set up again
 
     @property
@@ -144,6 +145,7 @@ class Config:
             provider=str(emb_raw.get("provider", "") or ""),
             dim=int(emb_raw.get("dim", 0)),
             timeout=int(emb_raw.get("timeout", DEFAULT_AI_TIMEOUT)),
+            include_body=_bool_config(emb_raw.get("include_body"), True),
             skip=bool(emb_raw.get("skip", False)),
         )
         defaults_raw = data.get("defaults", {}) or {}
@@ -185,6 +187,7 @@ def _default_embed_config() -> dict:
         "command": "quack embed text",
         "dim": 256,
         "timeout": DEFAULT_AI_TIMEOUT,
+        "include_body": True,
     }
 
 
@@ -206,6 +209,9 @@ def _ensure_config_shape(data: dict) -> dict:
     data["index"].setdefault("store_body", DEFAULT_STORE_BODY)
     data["index"].setdefault("diagrams", DEFAULT_DIAGRAMS)
     data.setdefault("embed", _default_embed_config())
+    if not isinstance(data.get("embed"), dict):
+        data["embed"] = _default_embed_config()
+    data["embed"].setdefault("include_body", True)
     data.setdefault("gitignore", True)
     return data
 
@@ -272,6 +278,9 @@ def write_config(
         "  command: quack embed text\n"
         "  dim: 256\n"
         f"  timeout: {DEFAULT_AI_TIMEOUT}\n"
+        "  # Set false to embed only path/name/type/tags/description/links,\n"
+        "  # without raw file body content.\n"
+        "  include_body: true\n"
         "\n"
         "# Set gitignore: false to opt out of quack managing a block in your\n"
         "# repo's .gitignore (and skip .quack/.gitignore creation).\n"
@@ -298,6 +307,7 @@ def write_embed_config(
         "command": command,
         "dim": dim,
         "timeout": timeout,
+        "include_body": _bool_config(data.get("embed", {}).get("include_body"), True),
         "skip": skip,
     }
     _write_config_data(path, data)
