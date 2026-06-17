@@ -392,7 +392,7 @@ def count_indexable(
     patterns = ignores if ignores is not None else load_ignores(root)
     n = 0
     if progress is not None:
-        progress(0, None, "Waddling the files: 0")
+        progress(0, None, "Waddling through files: 0")
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
         _record, descend = _level(base, dirnames, root, patterns)
@@ -402,7 +402,7 @@ def count_indexable(
             if _keep_file(fn, rel, patterns):
                 n += 1
                 if progress is not None and n % 100 == 0:
-                    progress(n, None, f"Waddling the files: {n:,}")
+                    progress(n, None, f"Waddling through files: {n:,}")
     if progress is not None:
         progress(n, None, f"Waddled {n:,} file(s)")
     return n

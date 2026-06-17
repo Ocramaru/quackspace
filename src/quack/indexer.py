@@ -419,9 +419,9 @@ def reindex(
 
     # Resolve folder metadata once and feed it to every consumer (dirty
     # detection, indexes, map, catalog) so they can't drift.
-    _phase_start("Resolving folder metadata")
+    _phase_start("Quacking at metadata")
     folder_infos = folders.resolve_folders(space)
-    _phase_done("Resolved folder metadata")
+    _phase_done("Quacked at metadata")
     _phase_start("Checking catalog changes")
     d = _compute_dirty(space, folder_infos)
     _phase_done("Checked catalog changes")
