@@ -21,10 +21,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
+from .catalog import DB_NAME
 from .config import Config
 from .embed import EMBED_PROVIDER_CHOICES
 from .prompts import yes_no
@@ -77,6 +82,96 @@ def _mcp_limit_kwargs(args) -> dict:
         "sql_row_limit": getattr(args, "sql_row_limit", None),
         "central_limit": getattr(args, "central_limit", None),
     }
+
+
+def _catalog_lock_paths(root: str | Path) -> list[Path]:
+    state = Path(root).resolve() / ".quack"
+    if not state.exists():
+        return []
+    paths = [state / DB_NAME]
+    paths.extend(sorted(state.glob(f"{DB_NAME}.prev-*")))
+    return [path for path in paths if path.exists()]
+
+
+def _locker_command(pid: int) -> str:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return ""
+    return result.stdout.strip()
+
+
+def _lock_holder_details(root: str | Path) -> list[tuple[int, str]]:
+    lock_paths = _catalog_lock_paths(root)
+    if not lock_paths:
+        return []
+    try:
+        result = subprocess.run(
+            ["lsof", "-t", "--", *map(str, lock_paths)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return []
+    lockers: list[tuple[int, str]] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pid = int(line)
+            command = _locker_command(pid)
+            if pid != os.getpid() and "quack" in command.lower():
+                lockers.append((pid, command))
+    lockers.sort(key=lambda item: item[0])
+    return lockers
+
+
+def _maybe_release_catalog_locks(root: str | Path) -> bool:
+    """Ask before terminating quack processes that are holding the catalog locked."""
+
+    lockers = _lock_holder_details(root)
+    if not lockers:
+        return True
+
+    pid, command = lockers[0]
+    summary = command if len(command) <= 120 else f"{command[:117]}..."
+    print(
+        "Quack discovered an existing .quack but "
+        f"process {summary} (pid {pid}) is locking up the .duckdb metastore so the init will fail."
+    )
+    if len(lockers) > 1:
+        print(f"  {len(lockers) - 1} other process(es) are also holding the catalog lock.")
+    if not yes_no("Would you like to autokill this process?", default=False):
+        print("  init cancelled")
+        return False
+
+    for pid, _command in lockers:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            continue
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if not _lock_holder_details(root):
+            return True
+        time.sleep(0.1)
+
+    for pid, _command in _lock_holder_details(root):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            continue
+    return True
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -996,6 +1091,8 @@ def _dispatch(argv: list[str] | None) -> int:
                     "Generate Mermaid diagrams during reindex?",
                     default=True,
                 )
+        if not args.no_reindex and not _maybe_release_catalog_locks(target_root):
+            return 1
         if args.dry_run:
             with swimming("Previewing init", total=1) as progress:
                 progress.update(0, 1, "Checking init plan")

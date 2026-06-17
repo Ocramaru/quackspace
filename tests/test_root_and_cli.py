@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import signal
 import sys
 from pathlib import Path
 
@@ -93,6 +94,74 @@ def test_init_can_skip_first_reindex(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "✓ scaffolded space at" in out
     assert "reindex: skipped (--no-reindex)" in out
+
+
+def test_init_prompts_before_autokilling_catalog_locker(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "space"
+    prompts: list[str] = []
+    events: list[tuple] = []
+
+    monkeypatch.setenv("QUACK_NO_ANIM", "1")
+    monkeypatch.setattr("quack.cli.run_setup", lambda _root: None)
+    monkeypatch.setattr(
+        "quack.cli._lock_holder_details",
+        lambda _root: [(54684, "/usr/bin/python3.13 /tmp/quack/cli.py init")],
+    )
+
+    def fake_input(prompt: str) -> str:
+        prompts.append(prompt)
+        return "y"
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+    monkeypatch.setattr(
+        "quack.cli.os.kill",
+        lambda pid, sig: events.append(("kill", pid, sig)),
+    )
+    monkeypatch.setattr(
+        "quack.cli.reindex",
+        lambda _root, progress=None: events.append(("reindex",)) or {"files": 0, "folder_indexes": 0},
+    )
+
+    assert main(["init", str(root)]) == 0
+
+    out = capsys.readouterr().out
+    assert "Quack discovered an existing .quack" in out
+    assert prompts and "Would you like to autokill this process?" in prompts[0]
+    assert events[0] == ("kill", 54684, signal.SIGTERM)
+    assert events[-1] == ("reindex",)
+
+
+def test_init_aborts_when_catalog_locker_is_not_autokilled(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "space"
+    prompts: list[str] = []
+    reindex_called = False
+
+    monkeypatch.setenv("QUACK_NO_ANIM", "1")
+    monkeypatch.setattr("quack.cli.run_setup", lambda _root: None)
+    monkeypatch.setattr(
+        "quack.cli._lock_holder_details",
+        lambda _root: [(54684, "/usr/bin/python3.13 /tmp/quack/cli.py init")],
+    )
+
+    def fake_input(prompt: str) -> str:
+        prompts.append(prompt)
+        return "n"
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+
+    def fail_reindex(_root, progress=None):
+        nonlocal reindex_called
+        reindex_called = True
+        raise AssertionError("reindex should not run after consent is denied")
+
+    monkeypatch.setattr("quack.cli.reindex", fail_reindex)
+
+    assert main(["init", str(root)]) == 1
+
+    out = capsys.readouterr().out
+    assert "init cancelled" in out
+    assert prompts and "Would you like to autokill this process?" in prompts[0]
+    assert not reindex_called
 
 
 def test_init_dry_run_lists_writes_without_scaffolding(tmp_path, capsys, monkeypatch):
