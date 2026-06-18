@@ -458,10 +458,10 @@ def reindex(
 
     _phase_start("Building catalog")
     if d.full_rebuild or d.need_full or catalog_mode_changed:
-        cat = catalog.build(space, folder_infos, store_body=store_body)
+        cat = catalog.build(space, folder_infos, store_body=store_body, embed_cfg=config.embed)
         mode = "full"
     else:
-        cat = catalog.update_light(space, folder_infos)
+        cat = catalog.update_light(space, folder_infos, embed_cfg=config.embed)
         mode = "light"
     _phase_done("Built catalog")
 
