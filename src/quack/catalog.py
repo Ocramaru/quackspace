@@ -33,65 +33,46 @@ from pathlib import Path
 
 import duckdb
 
+from .config import (
+    DEFAULT_BODYLESS_EMBED_EXTENSIONS,
+    DEFAULT_BODYLESS_EMBED_TAGS,
+    DEFAULT_EMBED_BODY_CHAR_LIMIT,
+)
 from .core import Space, find_root
 
 DB_NAME = "quack.duckdb"
 SCHEMA_VERSION = 3
-EMBED_BODY_CHAR_LIMIT = 4_000
-BODYLESS_EMBED_TAGS = {"assets", "data", "dependencies", "lockfile"}
-BODYLESS_EMBED_EXTENSIONS = {
-    "ai",
-    "avif",
-    "bmp",
-    "csv",
-    "db",
-    "duckdb",
-    "gif",
-    "gz",
-    "ico",
-    "jpeg",
-    "jpg",
-    "jsonl",
-    "log",
-    "mp3",
-    "mp4",
-    "parquet",
-    "pdf",
-    "png",
-    "sqlite",
-    "sqlite3",
-    "svg",
-    "tar",
-    "tsv",
-    "webp",
-    "woff",
-    "woff2",
-    "xls",
-    "xlsx",
-    "zip",
-}
 
 
-def embeds_body(entry) -> bool:
+def embeds_body(
+    entry,
+    bodyless_extensions: frozenset = DEFAULT_BODYLESS_EMBED_EXTENSIONS,
+    bodyless_tags: frozenset = DEFAULT_BODYLESS_EMBED_TAGS,
+) -> bool:
     """Whether semantic embeddings should include raw file content."""
     if entry.is_binary or not entry.body:
         return False
-    if entry.ext in BODYLESS_EMBED_EXTENSIONS:
+    if entry.ext in bodyless_extensions:
         return False
-    if BODYLESS_EMBED_TAGS.intersection(entry.tags):
+    if bodyless_tags.intersection(entry.tags):
         return False
     return True
 
 
-def embed_body_text(entry) -> str:
+def embed_body_text(
+    entry,
+    body_char_limit: int = DEFAULT_EMBED_BODY_CHAR_LIMIT,
+    bodyless_extensions: frozenset = DEFAULT_BODYLESS_EMBED_EXTENSIONS,
+    bodyless_tags: frozenset = DEFAULT_BODYLESS_EMBED_TAGS,
+) -> str:
     """Bound raw file content included in semantic embeddings."""
-    if not embeds_body(entry):
+    if not embeds_body(entry, bodyless_extensions, bodyless_tags):
         return ""
-    if len(entry.body) <= EMBED_BODY_CHAR_LIMIT:
+    if len(entry.body) <= body_char_limit:
         return entry.body
     return (
-        entry.body[:EMBED_BODY_CHAR_LIMIT]
-        + f"\n\n[quack: body truncated at {EMBED_BODY_CHAR_LIMIT} characters]"
+        entry.body[:body_char_limit]
+        + f"\n\n[quack: body truncated at {body_char_limit} characters]"
     )
 
 
@@ -106,7 +87,14 @@ def db_path(space: Space) -> Path:
     return space.root / ".quack" / DB_NAME
 
 
-def file_embed_text(entry, *, include_body: bool = True) -> str:
+def file_embed_text(
+    entry,
+    *,
+    include_body: bool = True,
+    body_char_limit: int = DEFAULT_EMBED_BODY_CHAR_LIMIT,
+    bodyless_extensions: frozenset = DEFAULT_BODYLESS_EMBED_EXTENSIONS,
+    bodyless_tags: frozenset = DEFAULT_BODYLESS_EMBED_TAGS,
+) -> str:
     """The file text surface used for semantic embeddings."""
     parts = [
         f"path: {entry.rel}",
@@ -120,7 +108,7 @@ def file_embed_text(entry, *, include_body: bool = True) -> str:
         parts.append(f"description: {entry.description}")
     if entry.links:
         parts.append(f"links: {', '.join(entry.links[:25])}")
-    body = embed_body_text(entry) if include_body else ""
+    body = embed_body_text(entry, body_char_limit, bodyless_extensions, bodyless_tags) if include_body else ""
     if body:
         parts.append(f"body:\n{body}")
     return "\n".join(parts).strip()

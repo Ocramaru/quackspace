@@ -24,10 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import core, index_store, recognize
+from .config import DEFAULT_TAG_ROLLUP_LIMIT
 from .core import Space
-
-# How many tags to surface in a folder's rollup.
-TAG_ROLLUP_LIMIT = 5
 
 
 @dataclass
@@ -88,7 +86,7 @@ def _resolve_description(
     return ("", a_tags, a_at) if a_tags else ("", [], "")
 
 
-def _build_info(space: Space, rel: str, files: list) -> FolderInfo:
+def _build_info(space: Space, rel: str, files: list, tag_rollup_limit: int = DEFAULT_TAG_ROLLUP_LIMIT) -> FolderInfo:
     root = space.root
     is_root = rel == ""
     folder_path = root if is_root else root / rel
@@ -132,12 +130,12 @@ def _build_info(space: Space, rel: str, files: list) -> FolderInfo:
         n_files=len(files),
         diagram=diagram,
         types=dict(types),
-        tag_rollup=[t for t, _ in tag_counts.most_common(TAG_ROLLUP_LIMIT)],
+        tag_rollup=[t for t, _ in tag_counts.most_common(tag_rollup_limit)],
         is_root=is_root,
     )
 
 
-def resolve_folders(space: Space) -> dict[str, FolderInfo]:
+def resolve_folders(space: Space, tag_rollup_limit: int = DEFAULT_TAG_ROLLUP_LIMIT) -> dict[str, FolderInfo]:
     """Map every folder's rel → ``FolderInfo``, including the root ("") and
     folders that contain only subfolders. The single source the per-folder
     indexes, ``map.yaml``, and the ``folders`` table all read from."""
@@ -154,7 +152,7 @@ def resolve_folders(space: Space) -> dict[str, FolderInfo]:
         rels.add(f.relative_to(space.root).as_posix())
     rels.update(by_folder)  # safety: any folder with files must be present
 
-    return {rel: _build_info(space, rel, by_folder.get(rel, [])) for rel in rels}
+    return {rel: _build_info(space, rel, by_folder.get(rel, []), tag_rollup_limit) for rel in rels}
 
 
 def children_index(infos: dict[str, FolderInfo]) -> dict[str, list[FolderInfo]]:

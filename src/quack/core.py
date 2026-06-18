@@ -406,10 +406,18 @@ def load_entry(path: Path, root: Path, body_max_bytes: int = TEXT_BODY_MAX_BYTES
     return Entry(path=path, root=root, body=body, is_binary=is_binary)
 
 
-def _level(base: Path, dirnames: list[str], root: Path, patterns: IgnoreRuleset):
+def _level(
+    base: Path,
+    dirnames: list[str],
+    root: Path,
+    patterns: IgnoreRuleset,
+    opaque_dirs: "frozenset[str] | None" = None,
+):
     """One os.walk level → (folders_to_record, dirs_to_descend). Shared by
     :func:`walk` and :func:`count_indexable` so pruning can't diverge: ignored
     dirs are hidden; opaque dirs are recorded as folders but not descended."""
+    if opaque_dirs is None:
+        opaque_dirs = DEFAULT_OPAQUE_DIRS
     record: list[Path] = []
     descend: list[str] = []
     for d in sorted(dirnames):
@@ -417,7 +425,7 @@ def _level(base: Path, dirnames: list[str], root: Path, patterns: IgnoreRuleset)
         if patterns.is_ignored(d, rel):
             continue
         record.append(base / d)
-        if d not in DEFAULT_OPAQUE_DIRS:
+        if d not in opaque_dirs:
             descend.append(d)
     return record, descend
 
@@ -464,6 +472,7 @@ def walk(
     dataset_policy: DatasetPolicy | None = None,
     datasets_out: dict[str, str] | None = None,
     body_max_bytes: int = TEXT_BODY_MAX_BYTES,
+    opaque_dirs: "frozenset[str] | None" = None,
 ) -> tuple[list[Entry], list[Path]]:
     """One filesystem pass → (entries, folders).
 
@@ -485,7 +494,7 @@ def walk(
     folders: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
-        record, descend = _level(base, dirnames, root, patterns)
+        record, descend = _level(base, dirnames, root, patterns, opaque_dirs)
         folders.extend(record)
         dirnames[:] = descend
         kept, reason = _filter_dir(base, filenames, root, patterns, policy)
@@ -504,6 +513,7 @@ def count_indexable(
     ignores: "IgnoreRuleset | None" = None,
     dataset_policy: DatasetPolicy | None = None,
     progress: "Callable[[int, int | None, str], None] | None" = None,
+    opaque_dirs: "frozenset[str] | None" = None,
 ) -> int:
     """Count the files :func:`walk` would index, without reading any of them.
     Cheap (stat/scandir only); used to get a total up front for later progress.
@@ -517,7 +527,7 @@ def count_indexable(
         progress(0, None, "Waddling through files: 0")
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
-        _record, descend = _level(base, dirnames, root, patterns)
+        _record, descend = _level(base, dirnames, root, patterns, opaque_dirs)
         dirnames[:] = descend
         kept, reason = _filter_dir(base, filenames, root, patterns, policy)
         if reason:
@@ -540,6 +550,7 @@ def scan_signature(
     ignores: "IgnoreRuleset | None" = None,
     dataset_policy: DatasetPolicy | None = None,
     progress: "Callable[[int, int, str], None] | None" = None,
+    opaque_dirs: "frozenset[str] | None" = None,
 ) -> tuple[dict[str, str], set[str], int]:
     """Stat-only change signature — no file reads, no parsing.
 
@@ -554,7 +565,7 @@ def scan_signature(
     would make every reindex look dirty)."""
     patterns = ignores if ignores is not None else load_ignores(root)
     policy = dataset_policy or DatasetPolicy()
-    total = count_indexable(root, patterns, policy, progress=progress) if progress is not None else 0
+    total = count_indexable(root, patterns, policy, progress=progress, opaque_dirs=opaque_dirs) if progress is not None else 0
     seen = 0
     if progress is not None:
         progress(0, max(total, 1), "Checking files")
@@ -563,7 +574,7 @@ def scan_signature(
     newest_marker_ns = 0
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
-        record, descend = _level(base, dirnames, root, patterns)
+        record, descend = _level(base, dirnames, root, patterns, opaque_dirs)
         for d in record:
             folders.add(d.relative_to(root).as_posix())
         dirnames[:] = descend
@@ -630,20 +641,20 @@ class Space:
         called as ``progress(done, total, message)`` per file during the scan —
         it triggers a cheap up-front count so a real total is known. Callers
         that don't need progress (search, embed, doctor) pay no extra walk."""
-        from .config import Config  # local import avoids a config<->core cycle
+        from .config import Config, DEFAULT_DATASET_EXTENSIONS  # local import avoids a config<->core cycle
 
         root = find_root(explicit)
         index_cfg = Config.load(str(root)).index
-        from .config import DEFAULT_DATASET_EXTENSIONS
         policy = DatasetPolicy(
             total=index_cfg.dataset_threshold,
             per_ext=index_cfg.dataset_ext_threshold,
             extensions=DEFAULT_DATASET_EXTENSIONS | frozenset(index_cfg.dataset_extensions),
         )
         body_max_bytes = index_cfg.body_max_bytes
+        opaque_dirs = DEFAULT_OPAQUE_DIRS | frozenset(index_cfg.opaque_dirs)
         on_file = None
         if progress is not None:
-            total = count_indexable(root, dataset_policy=policy, progress=progress)
+            total = count_indexable(root, dataset_policy=policy, opaque_dirs=opaque_dirs, progress=progress)
             seen = {"n": 0}
 
             def on_file(entry: Entry) -> None:
@@ -655,7 +666,7 @@ class Space:
         datasets: dict[str, str] = {}
         entries, folders = walk(
             root, on_file=on_file, dataset_policy=policy, datasets_out=datasets,
-            body_max_bytes=body_max_bytes,
+            body_max_bytes=body_max_bytes, opaque_dirs=opaque_dirs,
         )
         if progress is not None:
             progress(0, 1, "Applying metadata")

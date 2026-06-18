@@ -392,12 +392,20 @@ def test_write_config_preserves_existing_defaults(tmp_path):
         "dim": 3,
         "timeout": 4,
         "include_body": True,
+        "body_char_limit": 4000,
+        "text_char_limit": 20000,
+        "bodyless_tags": [],
+        "bodyless_extensions": [],
     }
     assert data["defaults"] == {
         "search_limit": 4,
         "file_char_limit": 123,
         "sql_row_limit": 5,
         "central_limit": 6,
+        "rrf_k": 60,
+        "weight_name": 10,
+        "weight_tag": 6,
+        "weight_description": 4,
     }
     assert data["index"] == {
         "store_body": False,
@@ -406,6 +414,8 @@ def test_write_config_preserves_existing_defaults(tmp_path):
         "dataset_ext_threshold": 500,
         "dataset_extensions": [],
         "body_max_bytes": 1_000_000,
+        "tag_rollup_limit": 5,
+        "opaque_dirs": [],
     }
 
 

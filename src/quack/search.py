@@ -34,6 +34,7 @@ def _in_hidden_dir(rel: str) -> bool:
     return any(p.startswith(".") for p in parts[:-1])
 
 
+
 def _load_local_boost(explicit_root: str | None) -> float:
     try:
         from .config import Config as _Config
@@ -45,17 +46,6 @@ def _load_local_boost(explicit_root: str | None) -> float:
 def _in_local_dir(rel: str, cwd_rel: str) -> bool:
     """True if rel is inside or directly at the cwd directory."""
     return rel == cwd_rel or rel.startswith(cwd_rel + "/")
-
-# Field weights for the structural tier (short fields only; body is the FTS
-# tier's domain). A hit in the name matters more than one in the description.
-WEIGHT_NAME = 10
-WEIGHT_TAG = 6
-WEIGHT_DESCRIPTION = 4
-
-# Reciprocal-rank-fusion constant. Each tier contributes 1/(RRF_K + rank);
-# k flattens the contribution of low ranks so no single tier dominates.
-RRF_K = 60
-
 
 @dataclass
 class Doc:
@@ -127,29 +117,34 @@ def _terms(query: str) -> list[str]:
 
 
 def _score_row(
-    name: str, description: str, tags_csv: str, terms: list[str]
+    name: str,
+    description: str,
+    tags_csv: str,
+    terms: list[str],
+    weight_name: int = 10,
+    weight_tag: int = 6,
+    weight_description: int = 4,
 ) -> tuple[float, list[str]]:
     score = 0.0
     reasons: list[str] = []
-    # Lowercase once; terms are already lowercase from _terms().
     name_l = name.lower()
     tags_l = (tags_csv or "").lower()
     desc_l = (description or "").lower()
 
     for term in terms:
         if term in name_l:
-            score += WEIGHT_NAME
+            score += weight_name
             reasons.append(f"name~{term}")
         if term in tags_l:
-            score += WEIGHT_TAG
+            score += weight_tag
             reasons.append(f"tag~{term}")
         if term in desc_l:
-            score += WEIGHT_DESCRIPTION
+            score += weight_description
             reasons.append(f"desc~{term}")
     return score, reasons
 
 
-def _structural_candidates(cur, fallback_rows, terms):
+def _structural_candidates(cur, fallback_rows, terms, weight_name=10, weight_tag=6, weight_description=4):
     """[(score, name, reasons), …] for files matching the short fields. From SQL
     (only matching rows) when a catalog is open, else from the fallback rows."""
     if cur is not None:
@@ -158,7 +153,7 @@ def _structural_candidates(cur, fallback_rows, terms):
         rows = ((n, d, t) for n, _rel, d, t in fallback_rows)
     scored = []
     for name, desc, tags_csv in rows:
-        s, reasons = _score_row(name, desc, tags_csv, terms)
+        s, reasons = _score_row(name, desc, tags_csv, terms, weight_name, weight_tag, weight_description)
         if s > 0:
             scored.append((s, name, reasons))
     scored.sort(key=lambda t: -t[0])
@@ -199,13 +194,18 @@ def search(
             progress(step, total_steps, message)
         step += 1
 
-    hidden_penalty = 1.0
     local_boost = 1.0
+    rrf_k = 60
+    weight_name, weight_tag, weight_description = 10, 6, 4
     try:
         from .config import Config as _Config
-        _cfg = _Config.load(explicit_root).defaults
-        hidden_penalty = _cfg.hidden_dir_penalty
-        local_boost = _cfg.local_dir_boost
+        _defs = _Config.load(explicit_root).defaults
+        hidden_penalty = _defs.hidden_dir_penalty
+        local_boost = _defs.local_dir_boost
+        rrf_k = _defs.rrf_k
+        weight_name = _defs.weight_name
+        weight_tag = _defs.weight_tag
+        weight_description = _defs.weight_description
     except Exception:
         pass
 
@@ -229,14 +229,14 @@ def search(
 
         def add_tier(tier: str, ranked_names: list[str]) -> None:
             for rank, name in enumerate(ranked_names):
-                fused[name] = fused.get(name, 0.0) + 1.0 / (RRF_K + rank)
+                fused[name] = fused.get(name, 0.0) + 1.0 / (rrf_k + rank)
                 tiers_by_name.setdefault(name, [])
                 if tier not in tiers_by_name[name]:
                     tiers_by_name[name].append(tier)
 
         # Tier 1: structural (short fields only; body is FTS's job).
         report("Searching structure")
-        structural = _structural_candidates(cur, fallback_rows, terms)
+        structural = _structural_candidates(cur, fallback_rows, terms, weight_name, weight_tag, weight_description)
         add_tier("structural", [name for _s, name, _r in structural])
         for _s, name, reasons in structural:
             reasons_by_name[name] = reasons
@@ -346,6 +346,13 @@ def search_folders(
     desc_by_folder = {f: (d or "") for f, _p, d in folder_rows}
     parent_by_folder = {f: (p or "") for f, p, _d in folder_rows}
 
+    rrf_k = 60
+    try:
+        from .config import Config as _Config
+        rrf_k = _Config.load(explicit_root).defaults.rrf_k
+    except Exception:
+        pass
+
     hits: dict[str, FolderHit] = {}
 
     # Tier 1: folder embeddings (semantic), if present.
@@ -360,7 +367,7 @@ def search_folders(
                 folder=folder,
                 parent=parent or parent_by_folder.get(folder, ""),
                 description=desc_by_folder.get(folder, ""),
-                score=1.0 / (RRF_K + rank),
+                score=1.0 / (rrf_k + rank),
                 via="semantic",
             )
     except Exception:
