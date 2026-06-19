@@ -96,6 +96,17 @@ def clean(
                 p.unlink()
             removed[key] += 1
 
+    # DuckLake artifacts (catalog.ducklake + lake_data/) are derived from the
+    # catalog; clean them alongside it without adding to the reported count.
+    if "catalog" in selected and not dry_run:
+        from .lake import LAKE_CATALOG_NAME, LAKE_DATA_DIRNAME
+        for lake_path in (quack_dir / LAKE_CATALOG_NAME, quack_dir / LAKE_DATA_DIRNAME):
+            if lake_path.exists():
+                if lake_path.is_dir():
+                    shutil.rmtree(lake_path)
+                else:
+                    lake_path.unlink()
+
     for p in artifacts:
         if p.name == DIAGRAM_NAME and "diagrams" in selected and p.exists():
             if not dry_run:

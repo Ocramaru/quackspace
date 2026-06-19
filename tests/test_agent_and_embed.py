@@ -218,7 +218,7 @@ def test_embed_setup_ollama_provider_can_pull(tmp_path, monkeypatch):
         "_pull_ollama_model",
         lambda model, timeout: pulled.append((model, timeout)),
     )
-    monkeypatch.setattr(embed_mod, "_ensure_ollama_server", lambda timeout: None)
+    monkeypatch.setattr(embed_mod, "_ensure_ollama_server", lambda timeout, **_kwargs: None)
     monkeypatch.setattr(embed_mod, "_embed_text", lambda _cfg, _text: [0.1, 0.2, 0.3])
 
     result = run_embed_setup(str(root), provider="ollama", pull=True, timeout=9)
@@ -249,7 +249,7 @@ def test_embed_setup_interactive_defaults_to_ollama(tmp_path, monkeypatch):
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(builtins, "input", lambda _prompt: "")
     monkeypatch.setattr(embed_mod, "_ollama_model_exists", lambda _model: True)
-    monkeypatch.setattr(embed_mod, "_ensure_ollama_server", lambda timeout: None)
+    monkeypatch.setattr(embed_mod, "_ensure_ollama_server", lambda timeout, **_kwargs: None)
     monkeypatch.setattr(embed_mod, "_embed_text", lambda _cfg, _text: [0.1, 0.2])
 
     result = run_embed_setup(str(root))
@@ -366,6 +366,7 @@ def test_embed_provider_flag_implies_setup(tmp_path, monkeypatch, capsys):
     from quack import embed as embed_mod
 
     root = scaffold_root(str(tmp_path / "space"))
+    monkeypatch.setattr(embed_mod, "_ensure_ollama_server", lambda timeout: None)
     monkeypatch.setattr(embed_mod, "_embed_text", lambda _cfg, _text: [0.1, 0.2])
 
     assert main(["embed", "--root", str(root), "--provider", "ollama"]) == 0
@@ -399,9 +400,11 @@ def test_embed_text_subcommand_prints_json_vector(capsys, monkeypatch):
 def test_embed_ollama_text_subcommand_prints_json_vector(capsys, monkeypatch):
     import io
 
+    from quack import embed as embed_mod
     from quack import embed_ollama
 
     monkeypatch.setattr(sys, "stdin", io.StringIO("body: search"))
+    monkeypatch.setattr(embed_mod, "_ensure_ollama_server", lambda timeout, **_kwargs: None)
     monkeypatch.setattr(embed_ollama, "embed", lambda text, model: [len(text), len(model)])
 
     assert main([

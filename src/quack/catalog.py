@@ -332,6 +332,7 @@ def build(
         _insert_rows(con, "tags", tag_rows)
         _insert_rows(con, "links", link_rows)
         con.execute("COMMIT")
+        _populate_fts_shadow(con)
         _build_fts(con)
         _restore_embedding_tables(con, old_path)
         n_files = con.execute("SELECT count(*) FROM files").fetchone()[0]
@@ -528,7 +529,30 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
         );
         CREATE TABLE tags  (name VARCHAR, tag VARCHAR);
         CREATE TABLE links (src VARCHAR, dst VARCHAR, dst_exists BOOLEAN);
+        CREATE TABLE _fts_shadow (
+            name        VARCHAR,
+            rel         VARCHAR,
+            description VARCHAR,
+            body        VARCHAR
+        );
         """
+    )
+
+
+def _populate_fts_shadow(con: duckdb.DuckDBPyConnection) -> None:
+    """Populate the FTS shadow table from the current files table.
+
+    This indirection lets files become a VIEW over DuckLake without breaking
+    the BM25 index, which requires a real DuckDB table. Idempotently creates the
+    table first so callers on pre-DuckLake catalogs (which lack it) don't fail.
+    """
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS _fts_shadow "
+        "(name VARCHAR, rel VARCHAR, description VARCHAR, body VARCHAR)"
+    )
+    con.execute("DELETE FROM _fts_shadow")
+    con.execute(
+        "INSERT INTO _fts_shadow SELECT name, rel, description, body FROM files"
     )
 
 
@@ -536,7 +560,7 @@ def _build_fts(con: duckdb.DuckDBPyConnection) -> None:
     """Create the BM25 full-text index over the searchable note fields."""
     con.execute("INSTALL fts; LOAD fts;")
     con.execute(
-        "PRAGMA create_fts_index('files', 'name', 'name', 'description', 'body', "
+        "PRAGMA create_fts_index('_fts_shadow', 'rel', 'name', 'description', 'body', "
         "overwrite=1);"
     )
 
@@ -837,8 +861,8 @@ def _fts_query(
         """
         SELECT rel, name, description, score FROM (
             SELECT rel, name, description,
-                   fts_main_files.match_bm25(name, ?) AS score
-            FROM files
+                   fts_main__fts_shadow.match_bm25(rel, ?) AS score
+            FROM _fts_shadow
         ) WHERE score IS NOT NULL
         ORDER BY score DESC
         LIMIT ?

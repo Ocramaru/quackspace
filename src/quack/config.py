@@ -50,6 +50,10 @@ DEFAULT_RRF_K = 60
 DEFAULT_WEIGHT_NAME = 10
 DEFAULT_WEIGHT_TAG = 6
 DEFAULT_WEIGHT_DESCRIPTION = 4
+DEFAULT_LAKE_ENABLED = True
+DEFAULT_LAKE_SNAPSHOT = True
+DEFAULT_LAKE_SIZE_THRESHOLD_MB = 200
+DEFAULT_LAKE_ROW_THRESHOLD = 100_000
 DEFAULT_DATASET_EXTENSIONS: frozenset[str] = frozenset({
     "npy", "npz", "pt", "pth", "ckpt", "safetensors", "onnx", "pb",
     "h5", "hdf5", "tfrecord", "mat", "pkl", "pickle", "bin",
@@ -164,12 +168,23 @@ class IndexConfig:
 
 
 @dataclass
+class LakeConfig:
+    """Controls DuckLake Parquet-backed catalog snapshots and auto-tiering."""
+
+    enabled: bool = DEFAULT_LAKE_ENABLED
+    snapshot_on_reindex: bool = DEFAULT_LAKE_SNAPSHOT
+    size_threshold_mb: int = DEFAULT_LAKE_SIZE_THRESHOLD_MB
+    row_threshold: int = DEFAULT_LAKE_ROW_THRESHOLD
+
+
+@dataclass
 class Config:
     ai: AIConfig
     embed: EmbedConfig
     path: Path | None = None  # the config file that was loaded, if any
     defaults: DefaultsConfig = field(default_factory=DefaultsConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
+    lake: LakeConfig = field(default_factory=LakeConfig)
 
     @classmethod
     def load(cls, explicit_root: str | None = None) -> "Config":
@@ -231,12 +246,22 @@ class Config:
             ),
             opaque_dirs=_name_list_config(index_raw.get("opaque_dirs")),
         )
+        lake_raw = data.get("lake", {}) or {}
+        if not isinstance(lake_raw, dict):
+            lake_raw = {}
+        lake = LakeConfig(
+            enabled=_bool_config(lake_raw.get("enabled"), DEFAULT_LAKE_ENABLED),
+            snapshot_on_reindex=_bool_config(lake_raw.get("snapshot_on_reindex"), DEFAULT_LAKE_SNAPSHOT),
+            size_threshold_mb=_int_config(lake_raw.get("size_threshold_mb"), DEFAULT_LAKE_SIZE_THRESHOLD_MB),
+            row_threshold=_int_config(lake_raw.get("row_threshold"), DEFAULT_LAKE_ROW_THRESHOLD),
+        )
         return cls(
             ai=ai,
             embed=embed,
             path=path if path.exists() else None,
             defaults=defaults,
             index=index,
+            lake=lake,
         )
 
 
@@ -301,6 +326,12 @@ def _ensure_config_shape(data: dict) -> dict:
     data["embed"].setdefault("text_char_limit", DEFAULT_EMBED_TEXT_CHAR_LIMIT)
     data["embed"].setdefault("bodyless_tags", [])
     data["embed"].setdefault("bodyless_extensions", [])
+    if not isinstance(data.get("lake"), dict):
+        data["lake"] = {}
+    data["lake"].setdefault("enabled", DEFAULT_LAKE_ENABLED)
+    data["lake"].setdefault("snapshot_on_reindex", DEFAULT_LAKE_SNAPSHOT)
+    data["lake"].setdefault("size_threshold_mb", DEFAULT_LAKE_SIZE_THRESHOLD_MB)
+    data["lake"].setdefault("row_threshold", DEFAULT_LAKE_ROW_THRESHOLD)
     _ensure_defaults_shape(data.setdefault("defaults", _default_defaults_config()))
     data.setdefault("gitignore", True)
     return data
@@ -385,6 +416,16 @@ def write_config(
         f"  text_char_limit: {DEFAULT_EMBED_TEXT_CHAR_LIMIT}  # max total chars sent to the embedding model\n"
         "  bodyless_tags: []        # additional tags whose files skip body embedding\n"
         "  bodyless_extensions: []  # additional extensions that skip body embedding\n"
+        "\n"
+        "lake:\n"
+        "  # DuckLake Parquet-backed catalog snapshots and auto-tiering.\n"
+        "  # When enabled, each reindex snapshots files+folders to .quack/lake_data/.\n"
+        f"  enabled: {'true' if DEFAULT_LAKE_ENABLED else 'false'}\n"
+        f"  snapshot_on_reindex: {'true' if DEFAULT_LAKE_SNAPSHOT else 'false'}\n"
+        "  # Tier body text to DuckLake when quack.duckdb exceeds this size (MB).\n"
+        f"  size_threshold_mb: {DEFAULT_LAKE_SIZE_THRESHOLD_MB}\n"
+        "  # Or when the files table exceeds this many rows.\n"
+        f"  row_threshold: {DEFAULT_LAKE_ROW_THRESHOLD}\n"
         "\n"
         "# Set gitignore: false to opt out of quack managing a block in your\n"
         "# repo's .gitignore (and skip .quack/.gitignore creation).\n"
