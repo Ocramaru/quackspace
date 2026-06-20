@@ -21,6 +21,7 @@ from . import catalog
 from .config import (
     Config,
     DEFAULT_CENTRAL_LIMIT,
+    DEFAULT_MAP_AUTO_ITEMS,
     DEFAULT_SEARCH_LIMIT,
     DEFAULT_SQL_ROW_LIMIT,
 )
@@ -32,12 +33,14 @@ This is quack, the meta layer over a directory of the user's work (notes, docs,
 code, configs, assets). Use it to find and navigate files precisely.
 
 How to navigate (cheapest first):
-1. `map()` — bounded folder-level overview. By default it shows only top-level
-   folders (`parent = ''`), not the whole tree. To go deeper, call
-   `map(parent='<folder>')` or sql("SELECT folder, n_files FROM folders WHERE
-   parent = '<folder>' ORDER BY n_files DESC"). To list files inside a folder,
-   use sql("SELECT rel, name, description FROM files WHERE folder = '<folder>'
-   ORDER BY name"), then pass any `rel` to `file_meta`.
+1. `map()` — directory listing AND a structural search. Lists a folder's child
+   `folders` and the `files` in it (top level when `parent=''`); descend with
+   `map(parent='<folder>')`. Also answers "where is X?" via filters: `ext`
+   (e.g. "py,md") and/or `min_size`/`max_size` prune the tree to just the
+   folders containing matches, with counts that reflect the filter — so
+   `map(ext="go")` shows only the Go parts of the tree. `depth` defaults to
+   auto (descends until ~50 entries; pass a number to fix it), `include_files`
+   can be turned off for a folders-only view. Pass any file `rel` to `file_meta`.
 2. `search` — auto-hybrid (keyword + full-text + semantic if available + graph
    neighbours). This is the default way to find files; you do not pick a mode.
 3. `file_meta` — description, tags, links, stale flag, and the absolute path for
@@ -76,6 +79,7 @@ MAX_SQL_ROW_LIMIT = 200
 MAX_SEARCH_LIMIT = 20
 MAX_CENTRAL_LIMIT = 50
 MAX_MAP_LIMIT = 100
+MAX_MAP_DEPTH = 5
 LARGE_ROOT_FILE_THRESHOLD = 10_000
 LARGE_ROOT_FOLDER_THRESHOLD = 1_000
 EDITOR_CACHE_DIRS = frozenset({".idea", ".ipynb_checkpoints"})
@@ -86,6 +90,7 @@ class LimitDefaults:
     search: int = DEFAULT_SEARCH_LIMIT
     sql_rows: int = DEFAULT_SQL_ROW_LIMIT
     central: int = DEFAULT_CENTRAL_LIMIT
+    map_auto_items: int = DEFAULT_MAP_AUTO_ITEMS
 
 
 LIMITS = LimitDefaults()
@@ -116,6 +121,7 @@ def configure_limits(
         search=_clamp(search_limit, base.search, MAX_SEARCH_LIMIT),
         sql_rows=_clamp(sql_row_limit, base.sql_rows, MAX_SQL_ROW_LIMIT),
         central=_clamp(central_limit, base.central, MAX_CENTRAL_LIMIT),
+        map_auto_items=base.map_auto_items,
     )
     return LIMITS
 
@@ -136,6 +142,7 @@ def configure_limits_from_config(
             search=cfg.defaults.search_limit,
             sql_rows=cfg.defaults.sql_row_limit,
             central=cfg.defaults.central_limit,
+            map_auto_items=cfg.defaults.map_auto_items,
         ),
     )
 
@@ -212,65 +219,71 @@ def _root() -> str:
 
 
 @mcp.tool()
-def map(parent: str = "", limit: int | None = None) -> dict[str, Any]:
-    """Bounded one-level directory listing: the child `folders` and the `files`
-    directly in this folder. Each folder entry is `{folder, files}` and each
-    file entry is `{rel}` (the full path, basename is the filename), both with
-    `description` only when one exists (so empty descriptions never bloat the
-    result). Pass a `folder` straight back as `map(parent='<folder>')` to
-    descend, or a file `rel` to file_meta.
+def map(
+    parent: str = "",
+    limit: int | None = None,
+    depth: int = 0,
+    include_files: bool = True,
+    ext: str = "",
+    min_size: int | None = None,
+    max_size: int | None = None,
+) -> dict[str, Any]:
+    """Directory listing of a folder: its child `folders` and the `files`
+    directly in it. A folder entry is `{folder, n_files, ...}`; a file entry is
+    `{rel}` (its basename is the filename); both carry `description` only when
+    one exists. Feed a `folder` back as `map(parent='<folder>')`, or a file
+    `rel` to `file_meta`. `parent=''` is the top level.
 
-    By default shows the top level (`parent = ''`), never the whole tree. Both
-    `folders` and `files` are capped at `limit`; `child_count` and `files_here`
-    are the true totals, and `truncated`/`files_truncated` say when the cap hit
-    (use sql for the full list). `total_files`/`total_folders` report catalog
-    scale. (For a human-readable tree, the CLI `quack map` renders the same
-    data.)"""
+    This doubles as a structural search — combine the params to ask precise
+    questions ("where are the Go files?", "show me the big assets"):
+
+    - `parent` (str): folder to list, relative to the root (e.g. "src/app").
+    - `depth` (int): folder levels to expand; each level nests children's own
+      `folders`/`files` recursively. **Default 0 = auto** — expands deeper while
+      the view stays under ~50 entries, so a sparse/filtered listing descends to
+      reveal content instead of stopping at a near-empty top level. The depth
+      actually used is returned as `depth`. An explicit value is capped at 5.
+    - `include_files` (bool, default true): false → folders-only structural map.
+    - `ext` (str, comma-separated, e.g. "py,md"): only files with these
+      extensions. **Folders with no match in their subtree are pruned**, and
+      every `n_files`/`files_here` becomes that subtree's *match* count — so the
+      result is just the part of the tree that contains those files.
+    - `min_size` / `max_size` (int, bytes): same scoping, by file size.
+
+    `folders`/`files` are capped per level at `limit`; `child_count`/`files_here`
+    are the true (post-filter) totals and `truncated`/`files_truncated` flag the
+    cap (use sql for the full list). `total_files`/`total_folders` report catalog
+    scale. (The CLI `quack map` renders this as a tree, and `quack map --at
+    <path>` maps any dir/file path — handy for a path from search().)"""
     limit = _clamp(limit, MAX_MAP_LIMIT, MAX_MAP_LIMIT)
-    parent = (parent or "").strip("/")
-    cur = catalog.read_cursor(_root_arg())
-    try:
-        rows = cur.execute(
-            """
-            SELECT folder, parent, description, n_files
-            FROM folders
-            WHERE parent = ?
-            ORDER BY n_files DESC, folder
-            LIMIT ?
-            """,
-            [parent, limit + 1],
-        ).fetchall()
-        child_count = cur.execute(
-            "SELECT COUNT(*) FROM folders WHERE parent = ?", [parent]
-        ).fetchone()[0]
-        files_here = cur.execute(
-            "SELECT COUNT(*) FROM files WHERE folder = ?", [parent]
-        ).fetchone()[0]
-        file_rows = cur.execute(
-            "SELECT rel, description FROM files WHERE folder = ? "
-            "ORDER BY name LIMIT ?",
-            [parent, limit + 1],
-        ).fetchall()
-    finally:
-        cur.close()
+    # depth 0 (or negative) → auto-fit; an explicit level is capped at MAX_MAP_DEPTH.
+    depth_arg = None if (depth is None or int(depth) <= 0) else min(int(depth), MAX_MAP_DEPTH)
+    exts = {e.strip().lstrip(".").lower() for e in (ext or "").split(",") if e.strip()} or None
+    listing = catalog.folder_listing(
+        _root_arg(),
+        parent,
+        depth=depth_arg,
+        include_files=include_files,
+        exts=exts,
+        min_size=min_size,
+        max_size=max_size,
+        limit=limit,
+        auto_items=LIMITS.map_auto_items,
+    )
     counts = _catalog_counts()
-    truncated = len(rows) > limit
-    shown = rows[:limit]
-    files_truncated = len(file_rows) > limit
-    files_shown = file_rows[:limit]
     tips = [
-        "One-level listing: `folders` are subfolders (descend with map(parent='<folder>')), "
+        "Listing: `folders` are subfolders (descend with map(parent='<folder>') or raise `depth`), "
         "`files` are the files directly here (pass a file `rel` to file_meta(path_or_name=rel)).",
     ]
-    if truncated:
+    if listing["truncated"]:
         tips.append(
-            f"Only {limit} of {child_count} child folders are shown; use a narrower parent "
-            "instead of asking for the whole tree."
+            f"Only {limit} of {listing['child_count']} child folders are shown; "
+            "use a narrower parent."
         )
-    if files_truncated:
+    if listing["files_truncated"]:
         tips.append(
-            f"Only {limit} of {files_here} files are shown; for the full list use "
-            "sql(\"SELECT rel, name, description FROM files WHERE folder = '<folder>' ORDER BY name\")."
+            f"Only {limit} of {listing['files_here']} files are shown; for the full list "
+            "use sql(\"SELECT rel, name FROM files WHERE folder = '<folder>' ORDER BY name\")."
         )
     if _is_large_catalog(counts):
         tips.append(
@@ -278,32 +291,19 @@ def map(parent: str = "", limit: int | None = None) -> dict[str, Any]:
             "avoid unbounded folder/file SQL and stay scoped by parent or folder."
         )
         tips.append(_scope_guidance())
-    folders = []
-    for folder, _row_parent, desc, n_files in shown:
-        entry = {"folder": folder, "files": int(n_files or 0)}
-        desc = (desc or "").strip()
-        if desc:
-            entry["description"] = desc
-        folders.append(entry)
-    files = []
-    for rel, desc in files_shown:
-        entry = {"rel": rel}
-        desc = (desc or "").strip()
-        if desc:
-            entry["description"] = desc
-        files.append(entry)
     return {
         "root": _root(),
-        "parent": parent,
-        "files_here": int(files_here or 0),
+        "parent": listing["parent"],
+        "depth": listing["depth"],
+        "files_here": listing["files_here"],
         "limit": limit,
-        "child_count": child_count,
+        "child_count": listing["child_count"],
         "total_files": counts["files"],
         "total_folders": counts["folders"],
-        "truncated": truncated,
-        "files_truncated": files_truncated,
-        "folders": folders,
-        "files": files,
+        "truncated": listing["truncated"],
+        "files_truncated": listing["files_truncated"],
+        "folders": listing["folders"],
+        "files": listing["files"],
         "next_steps": " ".join(tips),
     }
 

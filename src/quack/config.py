@@ -35,6 +35,7 @@ DEFAULT_AI_TIMEOUT = 120
 DEFAULT_SEARCH_LIMIT = 10
 DEFAULT_SQL_ROW_LIMIT = 50
 DEFAULT_CENTRAL_LIMIT = 10
+DEFAULT_MAP_AUTO_ITEMS = 50
 DEFAULT_HIDDEN_DIR_PENALTY = 1.0
 DEFAULT_LOCAL_DIR_BOOST = 1.5
 DEFAULT_STORE_BODY = True
@@ -144,6 +145,7 @@ class DefaultsConfig:
     search_limit: int = DEFAULT_SEARCH_LIMIT
     sql_row_limit: int = DEFAULT_SQL_ROW_LIMIT
     central_limit: int = DEFAULT_CENTRAL_LIMIT
+    map_auto_items: int = DEFAULT_MAP_AUTO_ITEMS
     hidden_dir_penalty: float = DEFAULT_HIDDEN_DIR_PENALTY
     local_dir_boost: float = DEFAULT_LOCAL_DIR_BOOST
     rrf_k: int = DEFAULT_RRF_K
@@ -217,6 +219,7 @@ class Config:
             search_limit=int(defaults_raw.get("search_limit", DEFAULT_SEARCH_LIMIT)),
             sql_row_limit=int(defaults_raw.get("sql_row_limit", DEFAULT_SQL_ROW_LIMIT)),
             central_limit=int(defaults_raw.get("central_limit", DEFAULT_CENTRAL_LIMIT)),
+            map_auto_items=_int_config(defaults_raw.get("map_auto_items"), DEFAULT_MAP_AUTO_ITEMS),
             hidden_dir_penalty=float(defaults_raw.get("hidden_dir_penalty", DEFAULT_HIDDEN_DIR_PENALTY)),
             local_dir_boost=float(defaults_raw.get("local_dir_boost", DEFAULT_LOCAL_DIR_BOOST)),
             rrf_k=_int_config(defaults_raw.get("rrf_k"), DEFAULT_RRF_K),
@@ -275,6 +278,7 @@ def _default_defaults_config() -> dict:
         "search_limit": DEFAULT_SEARCH_LIMIT,
         "sql_row_limit": DEFAULT_SQL_ROW_LIMIT,
         "central_limit": DEFAULT_CENTRAL_LIMIT,
+        "map_auto_items": DEFAULT_MAP_AUTO_ITEMS,
         "rrf_k": DEFAULT_RRF_K,
         "weight_name": DEFAULT_WEIGHT_NAME,
         "weight_tag": DEFAULT_WEIGHT_TAG,
@@ -283,6 +287,7 @@ def _default_defaults_config() -> dict:
 
 
 def _ensure_defaults_shape(d: dict) -> None:
+    d.setdefault("map_auto_items", DEFAULT_MAP_AUTO_ITEMS)
     d.setdefault("rrf_k", DEFAULT_RRF_K)
     d.setdefault("weight_name", DEFAULT_WEIGHT_NAME)
     d.setdefault("weight_tag", DEFAULT_WEIGHT_TAG)
@@ -384,6 +389,7 @@ def write_config(
         f"  search_limit: {DEFAULT_SEARCH_LIMIT}\n"
         f"  sql_row_limit: {DEFAULT_SQL_ROW_LIMIT}\n"
         f"  central_limit: {DEFAULT_CENTRAL_LIMIT}\n"
+        f"  map_auto_items: {DEFAULT_MAP_AUTO_ITEMS}  # `quack map` auto-depth target: expand until ~this many entries\n"
         f"  rrf_k: {DEFAULT_RRF_K}  # reciprocal rank fusion constant (higher = flatter score spread)\n"
         f"  weight_name: {DEFAULT_WEIGHT_NAME}    # structural tier: name match score\n"
         f"  weight_tag: {DEFAULT_WEIGHT_TAG}     # structural tier: tag match score\n"

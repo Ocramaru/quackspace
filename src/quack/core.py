@@ -359,6 +359,15 @@ class Entry:
         file is gone). Refreshed every reindex."""
         return _mtime_iso(self.path)
 
+    @cached_property
+    def size(self) -> int:
+        """The file's size in bytes (0 if the file is gone). Refreshed every
+        reindex; used for size-based filtering in map/sql."""
+        try:
+            return self.path.stat().st_size
+        except OSError:
+            return 0
+
     @property
     def described_at(self) -> str:
         """When the current description was written. For a value authored in the
