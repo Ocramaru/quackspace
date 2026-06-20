@@ -193,6 +193,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_diagram = sub.add_parser("diagram", help="regenerate Mermaid link diagrams only")
     _add_root_arg(p_diagram)
 
+    p_map = sub.add_parser("map", help="print the folder tree (one level under a parent)")
+    _add_root_arg(p_map)
+    p_map.add_argument(
+        "parent", nargs="?", default=None,
+        help="folder to list children of (default: the folder you're in)",
+    )
+    p_map.add_argument(
+        "-n", "--limit", type=int, default=None, help="max child folders to show"
+    )
+
     p_clean = sub.add_parser(
         "clean", help="remove generated artifacts (catalog/map/diagrams)"
     )
@@ -748,6 +758,89 @@ def _incomplete_command(parser: argparse.ArgumentParser, args) -> argparse.Argum
         current = subparsers.choices[chosen]
 
 
+def _run_map(args) -> int:
+    """Print one level of the folder tree under *parent* as a rich tree.
+
+    Human-facing companion to the MCP `map` tool: same catalog query, rendered
+    with rich tree connectors and the description inline (dimmed) instead of the
+    compact JSON the MCP tool returns.
+    """
+    from rich.console import Console
+    from rich.text import Text
+    from rich.tree import Tree
+
+    from . import catalog
+
+    root = find_root(args.root)
+    # No explicit folder → default to the folder you're standing in, relative
+    # to the space root (so `quack map` behaves like `ls`/`tree` for the cwd).
+    if args.parent is None:
+        try:
+            rel = Path.cwd().resolve().relative_to(root.resolve()).as_posix()
+            parent = "" if rel == "." else rel
+        except ValueError:
+            parent = ""  # cwd is outside the root — fall back to top level
+    else:
+        parent = args.parent.strip("/")
+
+    sql = (
+        "SELECT folder, description, n_files FROM folders "
+        "WHERE parent = ? ORDER BY n_files DESC, folder"
+    )
+    params: list = [parent]
+    if args.limit:
+        sql += " LIMIT ?"
+        params.append(int(args.limit))
+    files_sql = (
+        "SELECT rel, description FROM files WHERE folder = ? ORDER BY name"
+    )
+    files_params: list = [parent]
+    if args.limit:
+        files_sql += " LIMIT ?"
+        files_params.append(int(args.limit))
+    con = catalog.connect(args.root)
+    try:
+        rows = con.execute(sql, params).fetchall()
+        child_count = con.execute(
+            "SELECT COUNT(*) FROM folders WHERE parent = ?", [parent]
+        ).fetchone()[0]
+        files_here = con.execute(
+            "SELECT COUNT(*) FROM files WHERE folder = ?", [parent]
+        ).fetchone()[0]
+        file_rows = con.execute(files_sql, files_params).fetchall()
+    finally:
+        con.close()
+
+    tree = Tree(Text(parent or root.name or str(root)))
+    # Subfolders first (trailing slash + file count), then the loose files.
+    for folder, desc, n_files in rows:
+        leaf = folder.rsplit("/", 1)[-1] or folder
+        label = Text(f"{leaf}/ ")
+        label.append(f"({int(n_files or 0)})", style="cyan")
+        desc = (desc or "").strip()
+        if desc:
+            label.append(f"  {desc}", style="dim")
+        tree.add(label)
+    if args.limit and child_count > len(rows):
+        tree.add(Text(
+            f"… {child_count - len(rows)} more folders (raise --limit)", style="dim"
+        ))
+    for rel, desc in file_rows:
+        label = Text(rel.rsplit("/", 1)[-1] or rel)
+        desc = (desc or "").strip()
+        if desc:
+            label.append(f"  {desc}", style="dim")
+        tree.add(label)
+    if args.limit and files_here > len(file_rows):
+        tree.add(Text(
+            f"… {files_here - len(file_rows)} more files (raise --limit)", style="dim"
+        ))
+    if not rows and not file_rows:
+        tree.add(Text("(empty)", style="dim"))
+    Console().print(tree)
+    return 0
+
+
 def _dispatch(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1000,6 +1093,9 @@ def _dispatch(argv: list[str] | None) -> int:
         cols, rows = catalog.query(args.query, explicit_root=args.root)
         print(_format_table(cols, rows, csv=args.csv))
         return 0
+
+    if args.command == "map":
+        return _run_map(args)
 
     if args.command == "mcp":
         return _run_mcp(args)

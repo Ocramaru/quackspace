@@ -211,58 +211,21 @@ def _root() -> str:
     return SERVER_ROOT or configure_root(None)
 
 
-def _render_folder_tree(
-    top_label: str, shown: list, truncated: bool, child_count: int
-) -> str:
-    """Render one level of child folders as a tree, e.g.
-
-        Projects
-        ├── knit_to_knit (14) "A project where we go over..."
-        └── sandbox (11)
-
-    Uses ``rich.tree`` for the connectors. File counts follow each entry as
-    ``(n)``; the description is appended in quotes only when present, truncated
-    so each line stays short. Nodes are added as plain ``Text`` so arbitrary
-    folder names/descriptions are never interpreted as console markup.
-    """
-    import io
-
-    from rich.console import Console
-    from rich.text import Text
-    from rich.tree import Tree
-
-    tree = Tree(Text(top_label))
-    for folder, _row_parent, desc, n_files in shown:
-        leaf = folder.rsplit("/", 1)[-1] or folder
-        desc = (desc or "").strip()
-        if len(desc) > 80:
-            desc = desc[:79].rstrip() + "…"
-        label = f"{leaf} ({int(n_files or 0)})"
-        if desc:
-            label += f' "{desc}"'
-        tree.add(Text(label))
-    if not shown:
-        tree.add(Text("(no subfolders)"))
-    elif truncated:
-        tree.add(Text(
-            f"… ({child_count - len(shown)} more folder(s) not shown — "
-            "narrow with map(parent='<folder>'))"
-        ))
-
-    buf = io.StringIO()
-    # Non-terminal Console renders plain text (no ANSI); wide width avoids wrap.
-    Console(file=buf, force_terminal=False, no_color=True, width=200).print(tree)
-    return buf.getvalue().rstrip("\n")
-
-
 @mcp.tool()
 def map(parent: str = "", limit: int | None = None) -> dict[str, Any]:
-    """Bounded folder-level overview, rendered as an indented `tree` string
-    (folder name, `(file count)`, and description when present). By default it
-    shows only top-level folders (`parent = ''`), never the whole tree. Pass
-    `parent='<folder>'` to descend one level. Shows folders, not files. The
-    `root`/`child_count`/`total_files`/`total_folders`/`truncated` fields give
-    the scale of the catalog so you know when to stay scoped."""
+    """Bounded one-level directory listing: the child `folders` and the `files`
+    directly in this folder. Each folder entry is `{folder, files}` and each
+    file entry is `{rel}` (the full path, basename is the filename), both with
+    `description` only when one exists (so empty descriptions never bloat the
+    result). Pass a `folder` straight back as `map(parent='<folder>')` to
+    descend, or a file `rel` to file_meta.
+
+    By default shows the top level (`parent = ''`), never the whole tree. Both
+    `folders` and `files` are capped at `limit`; `child_count` and `files_here`
+    are the true totals, and `truncated`/`files_truncated` say when the cap hit
+    (use sql for the full list). `total_files`/`total_folders` report catalog
+    scale. (For a human-readable tree, the CLI `quack map` renders the same
+    data.)"""
     limit = _clamp(limit, MAX_MAP_LIMIT, MAX_MAP_LIMIT)
     parent = (parent or "").strip("/")
     cur = catalog.read_cursor(_root_arg())
@@ -280,20 +243,34 @@ def map(parent: str = "", limit: int | None = None) -> dict[str, Any]:
         child_count = cur.execute(
             "SELECT COUNT(*) FROM folders WHERE parent = ?", [parent]
         ).fetchone()[0]
+        files_here = cur.execute(
+            "SELECT COUNT(*) FROM files WHERE folder = ?", [parent]
+        ).fetchone()[0]
+        file_rows = cur.execute(
+            "SELECT rel, description FROM files WHERE folder = ? "
+            "ORDER BY name LIMIT ?",
+            [parent, limit + 1],
+        ).fetchall()
     finally:
         cur.close()
     counts = _catalog_counts()
     truncated = len(rows) > limit
     shown = rows[:limit]
+    files_truncated = len(file_rows) > limit
+    files_shown = file_rows[:limit]
     tips = [
-        "This is a one-level folder view. Pick a folder and call map(parent='<folder>') "
-        "to descend, or use sql(\"SELECT folder, n_files FROM folders WHERE parent = '<folder>' ORDER BY n_files DESC\").",
-        "To list files inside a folder, use sql(\"SELECT rel, name, description FROM files WHERE folder = '<folder>' ORDER BY name\"), then call file_meta(path_or_name=rel).",
+        "One-level listing: `folders` are subfolders (descend with map(parent='<folder>')), "
+        "`files` are the files directly here (pass a file `rel` to file_meta(path_or_name=rel)).",
     ]
     if truncated:
         tips.append(
             f"Only {limit} of {child_count} child folders are shown; use a narrower parent "
             "instead of asking for the whole tree."
+        )
+    if files_truncated:
+        tips.append(
+            f"Only {limit} of {files_here} files are shown; for the full list use "
+            "sql(\"SELECT rel, name, description FROM files WHERE folder = '<folder>' ORDER BY name\")."
         )
     if _is_large_catalog(counts):
         tips.append(
@@ -301,17 +278,32 @@ def map(parent: str = "", limit: int | None = None) -> dict[str, Any]:
             "avoid unbounded folder/file SQL and stay scoped by parent or folder."
         )
         tips.append(_scope_guidance())
-    root = _root()
-    top_label = parent or (root.rstrip("/").rsplit("/", 1)[-1] or root)
+    folders = []
+    for folder, _row_parent, desc, n_files in shown:
+        entry = {"folder": folder, "files": int(n_files or 0)}
+        desc = (desc or "").strip()
+        if desc:
+            entry["description"] = desc
+        folders.append(entry)
+    files = []
+    for rel, desc in files_shown:
+        entry = {"rel": rel}
+        desc = (desc or "").strip()
+        if desc:
+            entry["description"] = desc
+        files.append(entry)
     return {
-        "root": root,
+        "root": _root(),
         "parent": parent,
+        "files_here": int(files_here or 0),
         "limit": limit,
         "child_count": child_count,
         "total_files": counts["files"],
         "total_folders": counts["folders"],
         "truncated": truncated,
-        "tree": _render_folder_tree(top_label, shown, truncated, child_count),
+        "files_truncated": files_truncated,
+        "folders": folders,
+        "files": files,
         "next_steps": " ".join(tips),
     }
 

@@ -436,3 +436,36 @@ def test_config_loads_index_body_storage(tmp_path):
 
     assert loaded.index.store_body is False
     assert loaded.index.diagrams is False
+
+
+def test_map_cli_defaults_to_cwd_folder(tmp_path, capsys, monkeypatch):
+    """`quack map` lists the folder you're standing in (cwd-relative), and an
+    explicit folder argument overrides that."""
+    from quack.indexer import reindex
+    from quack.scaffold import scaffold_root
+
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "alpha" / "nested").mkdir(parents=True)
+    (root / "alpha" / "note.md").write_text("# a\n")
+    (root / "alpha" / "nested" / "deep.md").write_text("# d\n")
+    reindex(str(root))
+
+    # From the root: top-level folders, not the nested one.
+    monkeypatch.chdir(root)
+    assert main(["map"]) == 0
+    out = capsys.readouterr().out
+    assert "alpha" in out
+    assert "nested" not in out
+
+    # From inside alpha: its child folders AND its loose files (reacts to cwd).
+    monkeypatch.chdir(root / "alpha")
+    assert main(["map"]) == 0
+    out = capsys.readouterr().out
+    assert "nested" in out
+    assert "note.md" in out  # map lists files, not just folders
+
+    # Explicit argument overrides cwd: ask for alpha while standing at root.
+    monkeypatch.chdir(root)
+    assert main(["map", "alpha"]) == 0
+    out = capsys.readouterr().out
+    assert "nested" in out
