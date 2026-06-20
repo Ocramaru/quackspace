@@ -24,7 +24,12 @@ jobs:
           last_tag=$(git describe --tags --abbrev=0)
           base=${last_tag#v}
           IFS=. read -r major minor patch <<< "$base"
-          dev_version="${major}.${minor}.$((patch + 1)).dev${{ github.run_number }}"
+          # Commits since the last tag. github.run_number is a repo-global
+          # counter that only ever grows, so the dev suffix kept climbing even
+          # after a version bump. Commit distance resets when a new tag lands,
+          # so each version starts its dev series over (e.g. v0.1.4 -> .dev1).
+          dev_num=$(git rev-list "${last_tag}..HEAD" --count)
+          dev_version="${major}.${minor}.$((patch + 1)).dev${dev_num}"
           echo "Dev version: $dev_version"
           echo "UV_DYNAMIC_VERSIONING_BYPASS=$dev_version" >> "$GITHUB_ENV"
       - name: Build dev wheel
