@@ -162,7 +162,7 @@ quack sql "SELECT src, dst FROM links WHERE NOT dst_exists"  # broken links
 
 `quack mcp install` writes `.mcp.json` at the workspace root (the auto-discover convention Claude Code and Kiro pick up) and optionally registers with installed client CLIs.
 
-The MCP server exposes `map`, `search`, `get_file`, `sql`, `graph_path`, `central`, `clusters` (read-only) plus `describe` and `reindex` (write). Every result includes `root` so the LLM can construct absolute paths.
+The MCP server exposes `map`, `search`, `file_meta`, `sql`, `graph_path`, `central`, `clusters`, and `explain` (read-only) plus `describe` and `reindex` (write). `file_meta` returns a file's metadata and `absolute_path` — never its content, so reads flow through the host's own permission-checked tools. `explain` gives an agent a guided tour of the tools and next-step suggestions. Every result includes `root` so the LLM can construct absolute paths.
 
 **Seeding a repo an agent already knows:** point the MCP server at a codebase and ask the assistant to call `describe(path, description, tags)` for each file it understands, then `reindex()` once. No per-file model shell-out; the agent writes what it already knows, and the catalog becomes searchable.
 

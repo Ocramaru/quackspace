@@ -59,8 +59,11 @@ it plays well with Obsidian but does not require it.
 ## Two ways to use it
 
 **A. MCP tools (preferred).** If the `quack` MCP server is connected, call its
-tools (`map`, `search`, `get_file`, `sql`, `graph_path`, `central`, `clusters`);
-each returns `root` so you can join `root` + the relative path to open a file.
+tools (`map`, `search`, `file_meta`, `sql`, `graph_path`, `central`, `clusters`,
+`explain`); each returns `root` and an `absolute_path` so you can open files via
+your host's own read tool. `file_meta` returns a file's metadata (description,
+tags, links, stale flag) — not its content. New here? Call `explain` first for
+a guided tour of the tools and suggested next steps.
 
 **B. The `quack` CLI:**
 ```

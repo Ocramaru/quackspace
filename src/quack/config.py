@@ -33,7 +33,6 @@ from .core import find_root
 CONFIG_NAME = "config.yaml"
 DEFAULT_AI_TIMEOUT = 120
 DEFAULT_SEARCH_LIMIT = 10
-DEFAULT_FILE_CHAR_LIMIT = 20_000
 DEFAULT_SQL_ROW_LIMIT = 50
 DEFAULT_CENTRAL_LIMIT = 10
 DEFAULT_HIDDEN_DIR_PENALTY = 1.0
@@ -54,6 +53,7 @@ DEFAULT_LAKE_ENABLED = True
 DEFAULT_LAKE_SNAPSHOT = True
 DEFAULT_LAKE_SIZE_THRESHOLD_MB = 200
 DEFAULT_LAKE_ROW_THRESHOLD = 100_000
+DEFAULT_DIAGRAM_MAX_DEPTH = 3
 DEFAULT_DATASET_EXTENSIONS: frozenset[str] = frozenset({
     "npy", "npz", "pt", "pth", "ckpt", "safetensors", "onnx", "pb",
     "h5", "hdf5", "tfrecord", "mat", "pkl", "pickle", "bin",
@@ -142,7 +142,6 @@ class DefaultsConfig:
     """Workspace-tunable defaults for agent-facing bounded outputs."""
 
     search_limit: int = DEFAULT_SEARCH_LIMIT
-    file_char_limit: int = DEFAULT_FILE_CHAR_LIMIT
     sql_row_limit: int = DEFAULT_SQL_ROW_LIMIT
     central_limit: int = DEFAULT_CENTRAL_LIMIT
     hidden_dir_penalty: float = DEFAULT_HIDDEN_DIR_PENALTY
@@ -165,6 +164,7 @@ class IndexConfig:
     body_max_bytes: int = DEFAULT_BODY_MAX_BYTES
     tag_rollup_limit: int = DEFAULT_TAG_ROLLUP_LIMIT
     opaque_dirs: list[str] = field(default_factory=list)
+    diagram_max_depth: int = DEFAULT_DIAGRAM_MAX_DEPTH
 
 
 @dataclass
@@ -215,7 +215,6 @@ class Config:
         defaults_raw = data.get("defaults", {}) or {}
         defaults = DefaultsConfig(
             search_limit=int(defaults_raw.get("search_limit", DEFAULT_SEARCH_LIMIT)),
-            file_char_limit=int(defaults_raw.get("file_char_limit", DEFAULT_FILE_CHAR_LIMIT)),
             sql_row_limit=int(defaults_raw.get("sql_row_limit", DEFAULT_SQL_ROW_LIMIT)),
             central_limit=int(defaults_raw.get("central_limit", DEFAULT_CENTRAL_LIMIT)),
             hidden_dir_penalty=float(defaults_raw.get("hidden_dir_penalty", DEFAULT_HIDDEN_DIR_PENALTY)),
@@ -228,6 +227,11 @@ class Config:
         index_raw = data.get("index", {}) or {}
         if not isinstance(index_raw, dict):
             index_raw = {}
+        raw_depth = index_raw.get("diagram_max_depth", DEFAULT_DIAGRAM_MAX_DEPTH)
+        try:
+            diagram_max_depth = max(0, int(raw_depth))
+        except (TypeError, ValueError):
+            diagram_max_depth = DEFAULT_DIAGRAM_MAX_DEPTH
         index = IndexConfig(
             store_body=_bool_config(index_raw.get("store_body"), DEFAULT_STORE_BODY),
             diagrams=_bool_config(index_raw.get("diagrams"), DEFAULT_DIAGRAMS),
@@ -245,6 +249,7 @@ class Config:
                 index_raw.get("tag_rollup_limit"), DEFAULT_TAG_ROLLUP_LIMIT
             ),
             opaque_dirs=_name_list_config(index_raw.get("opaque_dirs")),
+            diagram_max_depth=diagram_max_depth,
         )
         lake_raw = data.get("lake", {}) or {}
         if not isinstance(lake_raw, dict):
@@ -268,7 +273,6 @@ class Config:
 def _default_defaults_config() -> dict:
     return {
         "search_limit": DEFAULT_SEARCH_LIMIT,
-        "file_char_limit": DEFAULT_FILE_CHAR_LIMIT,
         "sql_row_limit": DEFAULT_SQL_ROW_LIMIT,
         "central_limit": DEFAULT_CENTRAL_LIMIT,
         "rrf_k": DEFAULT_RRF_K,
@@ -318,6 +322,7 @@ def _ensure_config_shape(data: dict) -> dict:
     data["index"].setdefault("body_max_bytes", DEFAULT_BODY_MAX_BYTES)
     data["index"].setdefault("tag_rollup_limit", DEFAULT_TAG_ROLLUP_LIMIT)
     data["index"].setdefault("opaque_dirs", [])
+    data["index"].setdefault("diagram_max_depth", DEFAULT_DIAGRAM_MAX_DEPTH)
     data.setdefault("embed", _default_embed_config())
     if not isinstance(data.get("embed"), dict):
         data["embed"] = _default_embed_config()
@@ -377,7 +382,6 @@ def write_config(
         "  # Agent-facing output defaults. Tool-call arguments and MCP serve flags\n"
         "  # can override these, but these are the persistent workspace defaults.\n"
         f"  search_limit: {DEFAULT_SEARCH_LIMIT}\n"
-        f"  file_char_limit: {DEFAULT_FILE_CHAR_LIMIT}\n"
         f"  sql_row_limit: {DEFAULT_SQL_ROW_LIMIT}\n"
         f"  central_limit: {DEFAULT_CENTRAL_LIMIT}\n"
         f"  rrf_k: {DEFAULT_RRF_K}  # reciprocal rank fusion constant (higher = flatter score spread)\n"
@@ -399,6 +403,7 @@ def write_config(
         f"  body_max_bytes: {DEFAULT_BODY_MAX_BYTES}  # max bytes read from each file for FTS body\n"
         f"  tag_rollup_limit: {DEFAULT_TAG_ROLLUP_LIMIT}  # top N tags surfaced in folder rollups\n"
         "  opaque_dirs: []  # additional dir names to record but not descend (e.g. build outputs)\n"
+        f"  diagram_max_depth: {DEFAULT_DIAGRAM_MAX_DEPTH}  # global link diagram includes folders up to this depth\n"
         "\n"
         "embed:\n"
         "  # Free local default. Run `quack embed init` to choose Ollama or\n"
