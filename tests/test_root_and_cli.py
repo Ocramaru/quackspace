@@ -417,6 +417,12 @@ def test_write_config_preserves_existing_defaults(tmp_path):
         "tag_rollup_limit": 5,
         "opaque_dirs": [],
     }
+    assert data["lake"] == {
+        "enabled": True,
+        "snapshot_on_reindex": True,
+        "size_threshold_mb": 200,
+        "row_threshold": 100000,
+    }
 
 
 def test_config_loads_index_body_storage(tmp_path):

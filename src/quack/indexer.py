@@ -465,6 +465,13 @@ def reindex(
         mode = "light"
     _phase_done("Built catalog")
 
+    if config.lake.enabled:
+        from . import lake as _lake
+
+        if config.lake.snapshot_on_reindex:
+            _lake.snapshot_catalog(space)
+        _lake.check_and_maybe_tier(space, config.lake)
+
     return {
         "space": str(space.root),
         "files": len(space.entries),
