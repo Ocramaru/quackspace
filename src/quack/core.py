@@ -30,6 +30,7 @@ MARKER_DIR = ".quack"
 DEFAULT_IGNORED_DIRS = {
     ".quack", ".obsidian", ".git", ".trash",
     "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".cache",
+    ".idea", ".ipynb_checkpoints",
 }
 
 # Opaque dirs: heavy, unambiguous vendored/dependency/virtualenv trees. We

@@ -52,13 +52,26 @@ def shortest_path(
 
 
 def centrality(
-    explicit_root: str | None = None, limit: int = 10
+    explicit_root: str | None = None,
+    limit: int = 10,
+    exclude_dir_names: "set[str] | frozenset[str] | None" = None,
 ) -> list[tuple[str, str, int]]:
     """Degree centrality: most-connected files. Returns [(name, rel, degree)].
 
     Degree (inbound + outbound, existing edges) is the cheap, robust signal;
     it is what makes a file a hub. Returns the top `limit`.
     """
+    excludes = sorted(exclude_dir_names or [])
+    exclude_clause = ""
+    params: list = []
+    if excludes:
+        parts = []
+        for name in excludes:
+            parts.append("(n.rel LIKE ? OR n.rel LIKE ?)")
+            params.extend([f"{name}/%", f"%/{name}/%"])
+        exclude_clause = "WHERE NOT (" + " OR ".join(parts) + ")"
+    params.append(limit)
+
     con = read_cursor(explicit_root)
     try:
         return con.execute(
@@ -67,10 +80,11 @@ def centrality(
             deg AS (SELECT a AS name, count(*) AS degree FROM edge GROUP BY a)
             SELECT n.name, n.rel, coalesce(d.degree, 0) AS degree
             FROM files n LEFT JOIN deg d ON d.name = n.name
+            {exclude_clause}
             ORDER BY degree DESC, n.name
             LIMIT ?
             """,
-            [limit],
+            params,
         ).fetchall()
     finally:
         con.close()
