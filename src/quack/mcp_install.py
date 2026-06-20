@@ -24,14 +24,12 @@ SERVER_NAME = "quack"
 
 def server_limit_args(
     search_limit: int | None = None,
-    file_char_limit: int | None = None,
     sql_row_limit: int | None = None,
     central_limit: int | None = None,
 ) -> list[str]:
     args: list[str] = []
     for flag, value in (
         ("--search-limit", search_limit),
-        ("--file-char-limit", file_char_limit),
         ("--sql-row-limit", sql_row_limit),
         ("--central-limit", central_limit),
     ):
@@ -43,7 +41,6 @@ def server_limit_args(
 def launch_command(
     explicit_root: str | None = None,
     search_limit: int | None = None,
-    file_char_limit: int | None = None,
     sql_row_limit: int | None = None,
     central_limit: int | None = None,
 ) -> tuple[str, list[str]]:
@@ -57,7 +54,6 @@ def launch_command(
     root_args = ["--root", str(root)]
     limit_args = server_limit_args(
         search_limit=search_limit,
-        file_char_limit=file_char_limit,
         sql_row_limit=sql_row_limit,
         central_limit=central_limit,
     )

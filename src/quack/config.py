@@ -33,7 +33,6 @@ from .core import find_root
 CONFIG_NAME = "config.yaml"
 DEFAULT_AI_TIMEOUT = 120
 DEFAULT_SEARCH_LIMIT = 10
-DEFAULT_FILE_CHAR_LIMIT = 20_000
 DEFAULT_SQL_ROW_LIMIT = 50
 DEFAULT_CENTRAL_LIMIT = 10
 DEFAULT_HIDDEN_DIR_PENALTY = 1.0
@@ -143,7 +142,6 @@ class DefaultsConfig:
     """Workspace-tunable defaults for agent-facing bounded outputs."""
 
     search_limit: int = DEFAULT_SEARCH_LIMIT
-    file_char_limit: int = DEFAULT_FILE_CHAR_LIMIT
     sql_row_limit: int = DEFAULT_SQL_ROW_LIMIT
     central_limit: int = DEFAULT_CENTRAL_LIMIT
     hidden_dir_penalty: float = DEFAULT_HIDDEN_DIR_PENALTY
@@ -217,7 +215,6 @@ class Config:
         defaults_raw = data.get("defaults", {}) or {}
         defaults = DefaultsConfig(
             search_limit=int(defaults_raw.get("search_limit", DEFAULT_SEARCH_LIMIT)),
-            file_char_limit=int(defaults_raw.get("file_char_limit", DEFAULT_FILE_CHAR_LIMIT)),
             sql_row_limit=int(defaults_raw.get("sql_row_limit", DEFAULT_SQL_ROW_LIMIT)),
             central_limit=int(defaults_raw.get("central_limit", DEFAULT_CENTRAL_LIMIT)),
             hidden_dir_penalty=float(defaults_raw.get("hidden_dir_penalty", DEFAULT_HIDDEN_DIR_PENALTY)),
@@ -276,7 +273,6 @@ class Config:
 def _default_defaults_config() -> dict:
     return {
         "search_limit": DEFAULT_SEARCH_LIMIT,
-        "file_char_limit": DEFAULT_FILE_CHAR_LIMIT,
         "sql_row_limit": DEFAULT_SQL_ROW_LIMIT,
         "central_limit": DEFAULT_CENTRAL_LIMIT,
         "rrf_k": DEFAULT_RRF_K,
@@ -386,7 +382,6 @@ def write_config(
         "  # Agent-facing output defaults. Tool-call arguments and MCP serve flags\n"
         "  # can override these, but these are the persistent workspace defaults.\n"
         f"  search_limit: {DEFAULT_SEARCH_LIMIT}\n"
-        f"  file_char_limit: {DEFAULT_FILE_CHAR_LIMIT}\n"
         f"  sql_row_limit: {DEFAULT_SQL_ROW_LIMIT}\n"
         f"  central_limit: {DEFAULT_CENTRAL_LIMIT}\n"
         f"  rrf_k: {DEFAULT_RRF_K}  # reciprocal rank fusion constant (higher = flatter score spread)\n"

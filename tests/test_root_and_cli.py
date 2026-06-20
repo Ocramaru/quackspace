@@ -373,7 +373,6 @@ def test_write_config_preserves_existing_defaults(tmp_path):
                 "embed": {"command": "embed", "dim": 3, "timeout": 4},
                 "defaults": {
                     "search_limit": 4,
-                    "file_char_limit": 123,
                     "sql_row_limit": 5,
                     "central_limit": 6,
                 },
@@ -399,7 +398,6 @@ def test_write_config_preserves_existing_defaults(tmp_path):
     }
     assert data["defaults"] == {
         "search_limit": 4,
-        "file_char_limit": 123,
         "sql_row_limit": 5,
         "central_limit": 6,
         "rrf_k": 60,

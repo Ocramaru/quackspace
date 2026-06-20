@@ -21,7 +21,6 @@ from . import catalog
 from .config import (
     Config,
     DEFAULT_CENTRAL_LIMIT,
-    DEFAULT_FILE_CHAR_LIMIT,
     DEFAULT_SEARCH_LIMIT,
     DEFAULT_SQL_ROW_LIMIT,
 )
@@ -68,7 +67,6 @@ and the catalog schema.
 
 mcp = FastMCP("quack", instructions=INSTRUCTIONS)
 
-MAX_FILE_CHAR_LIMIT = 100_000
 MAX_SQL_ROW_LIMIT = 200
 MAX_SEARCH_LIMIT = 20
 MAX_CENTRAL_LIMIT = 50
@@ -77,7 +75,6 @@ MAX_CENTRAL_LIMIT = 50
 @dataclass
 class LimitDefaults:
     search: int = DEFAULT_SEARCH_LIMIT
-    file_chars: int = DEFAULT_FILE_CHAR_LIMIT
     sql_rows: int = DEFAULT_SQL_ROW_LIMIT
     central: int = DEFAULT_CENTRAL_LIMIT
 
@@ -99,7 +96,6 @@ def _root_arg() -> str | None:
 
 def configure_limits(
     search_limit: int | None = None,
-    file_char_limit: int | None = None,
     sql_row_limit: int | None = None,
     central_limit: int | None = None,
     base: LimitDefaults | None = None,
@@ -109,7 +105,6 @@ def configure_limits(
     base = base or LimitDefaults()
     LIMITS = LimitDefaults(
         search=_clamp(search_limit, base.search, MAX_SEARCH_LIMIT),
-        file_chars=_clamp(file_char_limit, base.file_chars, MAX_FILE_CHAR_LIMIT),
         sql_rows=_clamp(sql_row_limit, base.sql_rows, MAX_SQL_ROW_LIMIT),
         central=_clamp(central_limit, base.central, MAX_CENTRAL_LIMIT),
     )
@@ -119,7 +114,6 @@ def configure_limits(
 def configure_limits_from_config(
     explicit_root: str | None = None,
     search_limit: int | None = None,
-    file_char_limit: int | None = None,
     sql_row_limit: int | None = None,
     central_limit: int | None = None,
 ) -> LimitDefaults:
@@ -127,12 +121,10 @@ def configure_limits_from_config(
     cfg = Config.load(explicit_root)
     return configure_limits(
         search_limit=search_limit,
-        file_char_limit=file_char_limit,
         sql_row_limit=sql_row_limit,
         central_limit=central_limit,
         base=LimitDefaults(
             search=cfg.defaults.search_limit,
-            file_chars=cfg.defaults.file_char_limit,
             sql_rows=cfg.defaults.sql_row_limit,
             central=cfg.defaults.central_limit,
         ),
@@ -711,7 +703,6 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="quack-mcp")
     parser.add_argument("--root", default=None, help="quack root containing .quack/")
     parser.add_argument("--search-limit", type=int, default=None)
-    parser.add_argument("--file-char-limit", type=int, default=None)
     parser.add_argument("--sql-row-limit", type=int, default=None)
     parser.add_argument("--central-limit", type=int, default=None)
     return parser
@@ -723,7 +714,6 @@ def main(argv: list[str] | None = None) -> None:
     configure_limits_from_config(
         explicit_root=_root_arg(),
         search_limit=args.search_limit,
-        file_char_limit=args.file_char_limit,
         sql_row_limit=args.sql_row_limit,
         central_limit=args.central_limit,
     )

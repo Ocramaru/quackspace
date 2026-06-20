@@ -70,7 +70,6 @@ def _add_root_arg(p: argparse.ArgumentParser) -> None:
 
 def _add_mcp_limit_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--search-limit", type=int, default=None, help="default MCP search result limit")
-    p.add_argument("--file-char-limit", type=int, default=None, help="default MCP file content character limit")
     p.add_argument("--sql-row-limit", type=int, default=None, help="default MCP SQL row limit")
     p.add_argument("--central-limit", type=int, default=None, help="default MCP centrality result limit")
 
@@ -78,7 +77,6 @@ def _add_mcp_limit_args(p: argparse.ArgumentParser) -> None:
 def _mcp_limit_kwargs(args) -> dict:
     return {
         "search_limit": getattr(args, "search_limit", None),
-        "file_char_limit": getattr(args, "file_char_limit", None),
         "sql_row_limit": getattr(args, "sql_row_limit", None),
         "central_limit": getattr(args, "central_limit", None),
     }

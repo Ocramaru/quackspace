@@ -207,7 +207,6 @@ def test_mcp_json_contains_agent_launch_command_and_limit_flags(tmp_path):
     path = mcp_install.write_project_config(
         str(root),
         search_limit=7,
-        file_char_limit=1234,
         sql_row_limit=8,
         central_limit=9,
     )
@@ -218,7 +217,6 @@ def test_mcp_json_contains_agent_launch_command_and_limit_flags(tmp_path):
     assert entry["command"]
     assert arg_value(entry["args"], "--root") == str(root.resolve())
     assert arg_value(entry["args"], "--search-limit") == "7"
-    assert arg_value(entry["args"], "--file-char-limit") == "1234"
     assert arg_value(entry["args"], "--sql-row-limit") == "8"
     assert arg_value(entry["args"], "--central-limit") == "9"
 
@@ -228,7 +226,6 @@ def test_nested_scaffold_inherits_parent_defaults(tmp_path):
     parent_config = parent / ".quack" / "config.yaml"
     data = yaml.safe_load(parent_config.read_text())
     data["defaults"]["search_limit"] = 4
-    data["defaults"]["file_char_limit"] = 123
     data["defaults"]["sql_row_limit"] = 5
     data["defaults"]["central_limit"] = 6
     write_yaml(parent_config, data)
