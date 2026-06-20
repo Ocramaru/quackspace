@@ -211,11 +211,58 @@ def _root() -> str:
     return SERVER_ROOT or configure_root(None)
 
 
+def _render_folder_tree(
+    top_label: str, shown: list, truncated: bool, child_count: int
+) -> str:
+    """Render one level of child folders as a tree, e.g.
+
+        Projects
+        ├── knit_to_knit (14) "A project where we go over..."
+        └── sandbox (11)
+
+    Uses ``rich.tree`` for the connectors. File counts follow each entry as
+    ``(n)``; the description is appended in quotes only when present, truncated
+    so each line stays short. Nodes are added as plain ``Text`` so arbitrary
+    folder names/descriptions are never interpreted as console markup.
+    """
+    import io
+
+    from rich.console import Console
+    from rich.text import Text
+    from rich.tree import Tree
+
+    tree = Tree(Text(top_label))
+    for folder, _row_parent, desc, n_files in shown:
+        leaf = folder.rsplit("/", 1)[-1] or folder
+        desc = (desc or "").strip()
+        if len(desc) > 80:
+            desc = desc[:79].rstrip() + "…"
+        label = f"{leaf} ({int(n_files or 0)})"
+        if desc:
+            label += f' "{desc}"'
+        tree.add(Text(label))
+    if not shown:
+        tree.add(Text("(no subfolders)"))
+    elif truncated:
+        tree.add(Text(
+            f"… ({child_count - len(shown)} more folder(s) not shown — "
+            "narrow with map(parent='<folder>'))"
+        ))
+
+    buf = io.StringIO()
+    # Non-terminal Console renders plain text (no ANSI); wide width avoids wrap.
+    Console(file=buf, force_terminal=False, no_color=True, width=200).print(tree)
+    return buf.getvalue().rstrip("\n")
+
+
 @mcp.tool()
 def map(parent: str = "", limit: int | None = None) -> dict[str, Any]:
-    """Bounded folder-level overview. By default, shows only top-level folders
-    (`parent = ''`), never the whole tree. Pass `parent='<folder>'` to descend
-    one level. Shows folders, not files."""
+    """Bounded folder-level overview, rendered as an indented `tree` string
+    (folder name, `(file count)`, and description when present). By default it
+    shows only top-level folders (`parent = ''`), never the whole tree. Pass
+    `parent='<folder>'` to descend one level. Shows folders, not files. The
+    `root`/`child_count`/`total_files`/`total_folders`/`truncated` fields give
+    the scale of the catalog so you know when to stay scoped."""
     limit = _clamp(limit, MAX_MAP_LIMIT, MAX_MAP_LIMIT)
     parent = (parent or "").strip("/")
     cur = catalog.read_cursor(_root_arg())
@@ -254,23 +301,17 @@ def map(parent: str = "", limit: int | None = None) -> dict[str, Any]:
             "avoid unbounded folder/file SQL and stay scoped by parent or folder."
         )
         tips.append(_scope_guidance())
+    root = _root()
+    top_label = parent or (root.rstrip("/").rsplit("/", 1)[-1] or root)
     return {
-        "root": _root(),
+        "root": root,
         "parent": parent,
         "limit": limit,
         "child_count": child_count,
         "total_files": counts["files"],
         "total_folders": counts["folders"],
         "truncated": truncated,
-        "folders": [
-            {
-                "folder": folder,
-                "parent": row_parent,
-                "description": desc or "",
-                "n_files": int(n_files or 0),
-            }
-            for folder, row_parent, desc, n_files in shown
-        ],
+        "tree": _render_folder_tree(top_label, shown, truncated, child_count),
         "next_steps": " ".join(tips),
     }
 

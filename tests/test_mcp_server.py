@@ -64,10 +64,13 @@ def test_mcp_map_defaults_to_top_level_and_can_descend(tmp_path, monkeypatch):
     top = mcp_server.map()
     nested = mcp_server.map(parent="alpha")
 
-    top_folders = {f["folder"] for f in top["folders"]}
-    assert {"alpha", "beta"}.issubset(top_folders)
-    assert "alpha/nested" not in top_folders
-    assert [f["folder"] for f in nested["folders"]] == ["alpha/nested"]
+    # Top level renders a tree of leaf folder names with file counts.
+    assert "alpha (" in top["tree"]
+    assert "beta (" in top["tree"]
+    assert "nested" not in top["tree"]  # nested folder not surfaced at the top
+    # Descending one level shows the child's leaf name.
+    assert "nested (" in nested["tree"]
+    assert nested["parent"] == "alpha"
     assert "parent = '<folder>'" in top["next_steps"]
 
 
@@ -86,7 +89,11 @@ def test_mcp_map_reports_truncation(tmp_path, monkeypatch):
 
     assert result["limit"] == 1
     assert result["truncated"] is True
-    assert result["child_count"] > len(result["folders"])
+    assert result["child_count"] > 1
+    # Only `limit` folder entries are rendered, plus a "more not shown" line.
+    folder_lines = [l for l in result["tree"].splitlines() if "dir-" in l]
+    assert len(folder_lines) == 1
+    assert "more folder(s) not shown" in result["tree"]
     assert "Only 1" in result["next_steps"]
 
 
