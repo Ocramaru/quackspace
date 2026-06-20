@@ -39,7 +39,8 @@ everything below, which must never be hand-edited:
    loading the whole graph, it returns only the slice you need:
    - `quack search "<terms>"` auto-hybrid ranks files (keyword + FTS + semantic
      if available) and adds their graph neighbours. `--fts`/`--semantic` force
-     a single tier.
+     a single tier. Returns the top 5 by default and prints how to ask for more
+     (`--limit N`); folders are hidden unless you pass `--with-folders`.
    - `quack sql "<SQL>"` queries the catalog directly. Tables: `files`
      (name, rel, folder, ext, description, tags_csv, n_links, n_inbound,
      is_orphan, is_binary, file_modified, described_at, stale, body),
@@ -47,8 +48,9 @@ everything below, which must never be hand-edited:
      — the direct subfolders of X are `WHERE parent = 'X'` (root is `''`) —
      `tags(name, tag)`, `links(src, dst, dst_exists)`.
 
-`quack search` also routes *where/which-folder* questions to folder-level
-results (the `folders` list), kept separate from file hits. With embeddings
+With `--with-folders`, `quack search` also routes *where/which-folder* questions
+to folder-level results (the `folders` list), kept separate from file hits and
+hidden by default. With embeddings
 built (`quack embed`), files and folders have their own vector spaces
 (`embeddings` and `folder_embeddings`) so the two never blend.
 
