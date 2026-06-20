@@ -101,9 +101,13 @@ ROOT_QUACKIGNORE = """# Gitignore-style rules, one per line. Quack evaluates the
 #
 # Handled automatically (no need to list):
 #   hidden entirely  — .quack, .git, .obsidian, .trash, and caches
-#                      (__pycache__, .mypy_cache, .pytest_cache, .ruff_cache)
+#                      (__pycache__, .mypy_cache, .pytest_cache, .ruff_cache, .cache)
 #   mentioned, not indexed — vendored/dependency trees (site-packages,
 #                      node_modules, .venv, venv, .tox, .eggs, bower_components)
+#   datasets — a folder with more files than index.dataset_threshold (any type),
+#                      or more than index.dataset_ext_threshold files of one bulk
+#                      type (.npy, .png, tensors…), is recorded and marked a
+#                      `dataset`, but its files are not indexed (see config.yaml).
 #
 # Build outputs are project-specific; ignore the ones you have (edit to taste):
 dist

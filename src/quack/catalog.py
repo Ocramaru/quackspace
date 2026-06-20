@@ -33,65 +33,48 @@ from pathlib import Path
 
 import duckdb
 
+from .config import (
+    DEFAULT_BODYLESS_EMBED_EXTENSIONS,
+    DEFAULT_BODYLESS_EMBED_TAGS,
+    DEFAULT_EMBED_BODY_CHAR_LIMIT,
+    DEFAULT_EMBED_TEXT_CHAR_LIMIT,
+    EmbedConfig,
+)
 from .core import Space, find_root
 
 DB_NAME = "quack.duckdb"
 SCHEMA_VERSION = 3
-EMBED_BODY_CHAR_LIMIT = 4_000
-BODYLESS_EMBED_TAGS = {"assets", "data", "dependencies", "lockfile"}
-BODYLESS_EMBED_EXTENSIONS = {
-    "ai",
-    "avif",
-    "bmp",
-    "csv",
-    "db",
-    "duckdb",
-    "gif",
-    "gz",
-    "ico",
-    "jpeg",
-    "jpg",
-    "jsonl",
-    "log",
-    "mp3",
-    "mp4",
-    "parquet",
-    "pdf",
-    "png",
-    "sqlite",
-    "sqlite3",
-    "svg",
-    "tar",
-    "tsv",
-    "webp",
-    "woff",
-    "woff2",
-    "xls",
-    "xlsx",
-    "zip",
-}
 
 
-def embeds_body(entry) -> bool:
+def embeds_body(
+    entry,
+    bodyless_extensions: frozenset = DEFAULT_BODYLESS_EMBED_EXTENSIONS,
+    bodyless_tags: frozenset = DEFAULT_BODYLESS_EMBED_TAGS,
+) -> bool:
     """Whether semantic embeddings should include raw file content."""
     if entry.is_binary or not entry.body:
         return False
-    if entry.ext in BODYLESS_EMBED_EXTENSIONS:
+    if entry.ext in bodyless_extensions:
         return False
-    if BODYLESS_EMBED_TAGS.intersection(entry.tags):
+    if bodyless_tags.intersection(entry.tags):
         return False
     return True
 
 
-def embed_body_text(entry) -> str:
+def embed_body_text(
+    entry,
+    body_char_limit: int = DEFAULT_EMBED_BODY_CHAR_LIMIT,
+    bodyless_extensions: frozenset = DEFAULT_BODYLESS_EMBED_EXTENSIONS,
+    bodyless_tags: frozenset = DEFAULT_BODYLESS_EMBED_TAGS,
+) -> str:
     """Bound raw file content included in semantic embeddings."""
-    if not embeds_body(entry):
+    if not embeds_body(entry, bodyless_extensions, bodyless_tags):
         return ""
-    if len(entry.body) <= EMBED_BODY_CHAR_LIMIT:
+    if len(entry.body) <= body_char_limit:
         return entry.body
     return (
-        entry.body[:EMBED_BODY_CHAR_LIMIT]
-        + f"\n\n[quack: body truncated at {EMBED_BODY_CHAR_LIMIT} characters]"
+        entry.body[:body_char_limit]
+        + f"\n\n[quack: body truncated at {body_char_limit} characters]"
     )
 
 
@@ -106,7 +89,14 @@ def db_path(space: Space) -> Path:
     return space.root / ".quack" / DB_NAME
 
 
-def file_embed_text(entry, *, include_body: bool = True) -> str:
+def file_embed_text(
+    entry,
+    *,
+    include_body: bool = True,
+    body_char_limit: int = DEFAULT_EMBED_BODY_CHAR_LIMIT,
+    bodyless_extensions: frozenset = DEFAULT_BODYLESS_EMBED_EXTENSIONS,
+    bodyless_tags: frozenset = DEFAULT_BODYLESS_EMBED_TAGS,
+) -> str:
     """The file text surface used for semantic embeddings."""
     parts = [
         f"path: {entry.rel}",
@@ -120,7 +110,7 @@ def file_embed_text(entry, *, include_body: bool = True) -> str:
         parts.append(f"description: {entry.description}")
     if entry.links:
         parts.append(f"links: {', '.join(entry.links[:25])}")
-    body = embed_body_text(entry) if include_body else ""
+    body = embed_body_text(entry, body_char_limit, bodyless_extensions, bodyless_tags) if include_body else ""
     if body:
         parts.append(f"body:\n{body}")
     return "\n".join(parts).strip()
@@ -130,8 +120,35 @@ def text_hash(text: str) -> str:
     return sha256(text.encode("utf-8")).hexdigest()
 
 
-def file_embed_source_hash(entry, *, include_body: bool = True) -> str:
-    return text_hash(file_embed_text(entry, include_body=include_body))
+def _truncate_embed_text(text: str, char_limit: int) -> str:
+    """Apply the same truncation that embed.py's _embedding_input applies."""
+    if len(text) <= char_limit:
+        return text
+    return text[:char_limit] + f"\n\n[quack: embedding input truncated at {char_limit} characters]"
+
+
+def file_embed_source_hash(
+    entry,
+    *,
+    include_body: bool = True,
+    body_char_limit: int = DEFAULT_EMBED_BODY_CHAR_LIMIT,
+    bodyless_extensions: frozenset = DEFAULT_BODYLESS_EMBED_EXTENSIONS,
+    bodyless_tags: frozenset = DEFAULT_BODYLESS_EMBED_TAGS,
+    text_char_limit: int = DEFAULT_EMBED_TEXT_CHAR_LIMIT,
+) -> str:
+    """Hash of the exact text that would be sent to the embedding model.
+
+    Must use the same parameters as embed.py::build_embeddings so that the
+    semantic search JOIN (embeddings.source_hash = sha256(cmd + files.embed_source_hash))
+    stays consistent with what was actually embedded."""
+    raw = file_embed_text(
+        entry,
+        include_body=include_body,
+        body_char_limit=body_char_limit,
+        bodyless_extensions=bodyless_extensions,
+        bodyless_tags=bodyless_tags,
+    )
+    return text_hash(_truncate_embed_text(raw, text_char_limit))
 
 
 def embed_cache_hash(source_hash: str, command: str) -> str:
@@ -174,7 +191,11 @@ def folder_embed_text(info, by_folder: dict, kids_by_parent: dict) -> str:
     return "\n".join(parts).strip()
 
 
-def folder_embed_source_hashes(space: Space, folder_infos: dict) -> dict[str, str]:
+def folder_embed_source_hashes(
+    space: Space,
+    folder_infos: dict,
+    text_char_limit: int = DEFAULT_EMBED_TEXT_CHAR_LIMIT,
+) -> dict[str, str]:
     from . import folders as _folders
 
     by_folder: dict[str, list] = defaultdict(list)
@@ -182,10 +203,30 @@ def folder_embed_source_hashes(space: Space, folder_infos: dict) -> dict[str, st
         by_folder[e.folder].append(e)
     kids_by_parent = _folders.children_index(folder_infos)
     return {
-        i.rel: text_hash(folder_embed_text(i, by_folder, kids_by_parent))
+        i.rel: text_hash(_truncate_embed_text(folder_embed_text(i, by_folder, kids_by_parent), text_char_limit))
         for i in folder_infos.values()
         if not i.is_root
     }
+
+
+def _resolve_embed_hash_params(embed_cfg: "EmbedConfig | None") -> tuple:
+    """Return (include_body, body_char_limit, bodyless_extensions, bodyless_tags, text_char_limit)
+    resolved from config, so callers use the same values as build_embeddings."""
+    if embed_cfg is None:
+        return (
+            True,
+            DEFAULT_EMBED_BODY_CHAR_LIMIT,
+            DEFAULT_BODYLESS_EMBED_EXTENSIONS,
+            DEFAULT_BODYLESS_EMBED_TAGS,
+            DEFAULT_EMBED_TEXT_CHAR_LIMIT,
+        )
+    return (
+        embed_cfg.include_body,
+        embed_cfg.body_char_limit,
+        DEFAULT_BODYLESS_EMBED_EXTENSIONS | frozenset(embed_cfg.bodyless_extensions),
+        DEFAULT_BODYLESS_EMBED_TAGS | frozenset(embed_cfg.bodyless_tags),
+        embed_cfg.text_char_limit,
+    )
 
 
 def _insert_rows(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple]) -> None:
@@ -211,7 +252,11 @@ def _insert_rows(con: duckdb.DuckDBPyConnection, table: str, rows: list[tuple]) 
 
 
 def build(
-    space: Space, folder_infos: "dict | None" = None, *, store_body: bool = True
+    space: Space,
+    folder_infos: "dict | None" = None,
+    *,
+    store_body: bool = True,
+    embed_cfg: "EmbedConfig | None" = None,
 ) -> dict:
     """Rebuild the catalog from scratch over the loaded space. Returns a
     summary. The space already carries effective metadata (authored .index.yaml
@@ -231,6 +276,8 @@ def build(
     tmp_path = path.with_name(f"{path.name}.build-{time.time_ns()}")
     old_path: Path | None = path if path.exists() else None
 
+    inc_body, body_lim, bodyless_ext, bodyless_tag, text_lim = _resolve_embed_hash_params(embed_cfg)
+
     names = set(space.by_name)
     inbound: dict[str, int] = defaultdict(int)
     for e in space.entries:
@@ -244,7 +291,14 @@ def build(
     for e in space.entries:
         n_in = inbound.get(e.name, 0)
         body = e.body if store_body else ""
-        embed_source_hash = file_embed_source_hash(e)
+        embed_source_hash = file_embed_source_hash(
+            e,
+            include_body=inc_body,
+            body_char_limit=body_lim,
+            bodyless_extensions=bodyless_ext,
+            bodyless_tags=bodyless_tag,
+            text_char_limit=text_lim,
+        )
         file_rows.append((
             e.name, e.rel, e.folder, e.ext, e.name,
             e.description, ",".join(e.tags),
@@ -256,7 +310,7 @@ def build(
         link_rows.extend((e.name, dst, dst in names) for dst in e.links)
 
     # One row per folder (excluding the root); parent "" means the root.
-    folder_hashes = folder_embed_source_hashes(space, folder_infos)
+    folder_hashes = folder_embed_source_hashes(space, folder_infos, text_lim)
     folder_rows = [
         (
             i.rel, i.parent, i.description, i.n_files, i.diagram, i.described_at,
@@ -342,7 +396,12 @@ def _restore_embedding_tables(
         con.execute("DETACH old_catalog;")
 
 
-def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
+def update_light(
+    space: Space,
+    folder_infos: "dict | None" = None,
+    *,
+    embed_cfg: "EmbedConfig | None" = None,
+) -> dict:
     """Incremental in-place update for changes that don't touch the full-text
     surface: file tags / described_at / stale / mtime, the tags table, and the
     folders table. Bodies, descriptions, names, links, inbound counts, and the
@@ -353,6 +412,8 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
         from . import folders as _folders
 
         folder_infos = _folders.resolve_folders(space)
+
+    inc_body, body_lim, bodyless_ext, bodyless_tag, text_lim = _resolve_embed_hash_params(embed_cfg)
 
     path = db_path(space)
     invalidate(path)  # free any cached read-only connection before writing
@@ -377,12 +438,20 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
         # One transaction for all writes (see build(): per-statement commits are
         # ~8x slower than batching them).
         con.execute("BEGIN TRANSACTION")
+        tag_rows: list[tuple[str, str]] = []
         for e in space.entries:
             current = (
                 ",".join(e.tags),
                 e.described_at,
                 e.modified,
-                file_embed_source_hash(e),
+                file_embed_source_hash(
+                    e,
+                    include_body=inc_body,
+                    body_char_limit=body_lim,
+                    bodyless_extensions=bodyless_ext,
+                    bodyless_tags=bodyless_tag,
+                    text_char_limit=text_lim,
+                ),
             )
             if stored.get(e.rel) != current:
                 con.execute(
@@ -390,15 +459,15 @@ def update_light(space: Space, folder_infos: "dict | None" = None) -> dict:
                     "file_modified = ?, embed_source_hash = ?, stale = ? WHERE rel = ?",
                     [current[0], e.described_at, e.modified, current[3], e.stale, e.rel],
                 )
+            tag_rows.extend((e.name, tag) for tag in e.tags)
 
         # tags and folders aren't full-text indexed, so rebuilding them wholesale
         # is cheap and keeps the code simple.
         con.execute("DELETE FROM tags;")
-        tag_rows = [(e.name, tag) for e in space.entries for tag in e.tags]
         _insert_rows(con, "tags", tag_rows)
 
         con.execute("DELETE FROM folders;")
-        folder_hashes = folder_embed_source_hashes(space, folder_infos)
+        folder_hashes = folder_embed_source_hashes(space, folder_infos, text_lim)
         folder_rows = [
             (
                 i.rel, i.parent, i.description, i.n_files, i.diagram, i.described_at,

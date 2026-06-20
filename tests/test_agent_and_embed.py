@@ -7,9 +7,9 @@ import pytest
 
 from quack.cli import main
 from quack.config import AIConfig, Config, EmbedConfig
+from quack.config import DEFAULT_EMBED_TEXT_CHAR_LIMIT as EMBED_TEXT_CHAR_LIMIT
 from quack.embed import (
     DEFAULT_EMBED_COMMAND,
-    EMBED_TEXT_CHAR_LIMIT,
     OLLAMA_EMBED_COMMAND,
     EmbedNotConfigured,
     _embed_text,
@@ -228,14 +228,14 @@ def test_embed_setup_ollama_provider_can_pull(tmp_path, monkeypatch):
     assert result.command == OLLAMA_EMBED_COMMAND
     assert pulled == [("nomic-embed-text", 9)]
     config = yaml.safe_load((root / ".quack" / "config.yaml").read_text())
-    assert config["embed"] == {
-        "provider": "ollama",
-        "command": OLLAMA_EMBED_COMMAND,
-        "dim": 3,
-        "timeout": 9,
-        "include_body": True,
-        "skip": False,
-    }
+    assert config["embed"]["provider"] == "ollama"
+    assert config["embed"]["command"] == OLLAMA_EMBED_COMMAND
+    assert config["embed"]["dim"] == 3
+    assert config["embed"]["timeout"] == 9
+    assert config["embed"]["include_body"] is True
+    assert config["embed"]["skip"] is False
+    assert config["embed"]["body_char_limit"] == 4000
+    assert config["embed"]["text_char_limit"] == 20000
 
 
 def test_embed_setup_interactive_defaults_to_ollama(tmp_path, monkeypatch):
@@ -484,19 +484,20 @@ def test_embedding_text_omits_raw_body_for_data_and_assets(tmp_path):
 
 
 def test_embedding_text_caps_raw_body_for_source_files(tmp_path):
-    from quack.catalog import EMBED_BODY_CHAR_LIMIT, file_embed_text
+    from quack.catalog import file_embed_text
+    from quack.config import DEFAULT_EMBED_BODY_CHAR_LIMIT
     from quack.core import Space
 
     root = scaffold_root(str(tmp_path / "space"))
-    (root / "app.py").write_text("x" * (EMBED_BODY_CHAR_LIMIT + 100))
+    (root / "app.py").write_text("x" * (DEFAULT_EMBED_BODY_CHAR_LIMIT + 100))
     space = Space.load(str(root))
     entry = next(e for e in space.entries if e.rel == "app.py")
 
     text = file_embed_text(entry)
 
-    assert "body:\n" + ("x" * EMBED_BODY_CHAR_LIMIT) in text
+    assert "body:\n" + ("x" * DEFAULT_EMBED_BODY_CHAR_LIMIT) in text
     assert "body truncated" in text
-    assert "x" * (EMBED_BODY_CHAR_LIMIT + 1) not in text
+    assert "x" * (DEFAULT_EMBED_BODY_CHAR_LIMIT + 1) not in text
 
 
 def test_embed_include_body_false_omits_all_file_bodies(tmp_path):

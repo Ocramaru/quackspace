@@ -36,7 +36,14 @@ from .catalog import (
     invalidate,
     text_hash,
 )
-from .config import DEFAULT_AI_TIMEOUT, Config, write_embed_config
+from .config import (
+    DEFAULT_AI_TIMEOUT,
+    DEFAULT_BODYLESS_EMBED_EXTENSIONS,
+    DEFAULT_BODYLESS_EMBED_TAGS,
+    DEFAULT_EMBED_TEXT_CHAR_LIMIT,
+    Config,
+    write_embed_config,
+)
 from .core import Space, find_root
 from .prompts import Choice, choice, is_interactive, text, yes_no
 from .subprocess_utils import failure_message
@@ -44,7 +51,6 @@ from .subprocess_utils import failure_message
 DEFAULT_EMBED_COMMAND = "quack embed text"
 OLLAMA_MODEL = "nomic-embed-text"
 OLLAMA_EMBED_COMMAND = f"quack embed text --provider ollama --model {OLLAMA_MODEL}"
-EMBED_TEXT_CHAR_LIMIT = 20_000
 
 
 @dataclass(frozen=True)
@@ -181,12 +187,12 @@ def _ollama_model_from_command(command: str) -> str:
         return OLLAMA_MODEL
 
 
-def _embedding_input(text: str) -> str:
-    if len(text) <= EMBED_TEXT_CHAR_LIMIT:
+def _embedding_input(text: str, char_limit: int = DEFAULT_EMBED_TEXT_CHAR_LIMIT) -> str:
+    if len(text) <= char_limit:
         return text
     return (
-        text[:EMBED_TEXT_CHAR_LIMIT]
-        + f"\n\n[quack: embedding input truncated at {EMBED_TEXT_CHAR_LIMIT} characters]"
+        text[:char_limit]
+        + f"\n\n[quack: embedding input truncated at {char_limit} characters]"
     )
 
 
@@ -504,25 +510,40 @@ def build_embeddings(
     for e in space.entries:
         by_folder[e.folder].append(e)
     kids_by_parent = _folders.children_index(folder_infos)
+    cfg = config.embed
+    bodyless_extensions = DEFAULT_BODYLESS_EMBED_EXTENSIONS | frozenset(cfg.bodyless_extensions)
+    bodyless_tags = DEFAULT_BODYLESS_EMBED_TAGS | frozenset(cfg.bodyless_tags)
     file_items = []
     for e in space.entries:
-        text = _embedding_input(file_embed_text(e, include_body=config.embed.include_body))
+        text = _embedding_input(
+            file_embed_text(
+                e,
+                include_body=cfg.include_body,
+                body_char_limit=cfg.body_char_limit,
+                bodyless_extensions=bodyless_extensions,
+                bodyless_tags=bodyless_tags,
+            ),
+            char_limit=cfg.text_char_limit,
+        )
         source_hash = text_hash(text)
         file_items.append(
-            (e.rel, e.name, embed_cache_hash(source_hash, config.embed.command), text)
+            (e.rel, e.name, embed_cache_hash(source_hash, cfg.command), text)
         )
     folder_items = []
     for i in folder_infos.values():
         if i.is_root:
             continue
-        text = _embedding_input(folder_embed_text(i, by_folder, kids_by_parent))
+        text = _embedding_input(
+            folder_embed_text(i, by_folder, kids_by_parent),
+            char_limit=cfg.text_char_limit,
+        )
         source_hash = text_hash(text)
         folder_items.append(
-            (i.rel, i.parent, embed_cache_hash(source_hash, config.embed.command), text)
+            (i.rel, i.parent, embed_cache_hash(source_hash, cfg.command), text)
         )
 
-    if config.embed.provider == "ollama":
-        _ensure_ollama_server(timeout=config.embed.timeout)
+    if cfg.provider == "ollama":
+        _ensure_ollama_server(timeout=cfg.timeout)
 
     invalidate(path)  # free any cached read-only connection before writing
     con = duckdb.connect(str(path))
@@ -531,7 +552,7 @@ def build_embeddings(
         con.execute("SET hnsw_enable_experimental_persistence = true;")
 
         existing_dim = _existing_vector_dim(con)
-        dim = config.embed.dim or existing_dim
+        dim = cfg.dim or existing_dim
 
         # If dim is still unknown, probe until one item succeeds. A single bad
         # file should not make the whole embedding run unusable.
@@ -589,10 +610,9 @@ def build_embeddings(
 
         n_todo = len(todo)
         total = n_todo + 3  # +3: two HNSW index steps + embedding_runs record
-        n_workers, max_workers, backend_label = _embedding_worker_limits(config.embed, workers)
+        n_workers, max_workers, backend_label = _embedding_worker_limits(cfg, workers)
         if backend_label is not None and progress is not None:
             progress(0, total, f"Ollama {backend_label}, {n_workers} worker(s)")
-        cfg = config.embed
 
         def _do_embed(item: tuple) -> tuple:
             try:

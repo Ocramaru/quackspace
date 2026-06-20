@@ -783,6 +783,11 @@ def _dispatch(argv: list[str] | None) -> int:
             f"  map:     {summary['map']}\n"
             f"  catalog: {summary['db']}"
         )
+        datasets = summary.get("datasets") or {}
+        if datasets:
+            print(f"  datasets: {len(datasets):,} folder(s) recorded but not indexed")
+            for rel, reason in sorted(datasets.items()):
+                print(f"    - {rel} ({reason})")
         if d is not None:
             print(f"  diagrams: {d['folder_diagrams']} folder(s) + {d['global']}")
         elif generate_diagrams:
