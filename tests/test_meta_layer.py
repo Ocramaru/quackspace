@@ -32,10 +32,13 @@ def test_recognize_exact_beats_glob_beats_extension():
     desc, tags = recognize.recognize_file("repo/pyproject.toml")
     assert "Python project" in desc
     assert "packaging" in tags
-    # Extension fallback for an unremarkable source file.
-    desc, tags = recognize.recognize_file("src/app/main.py")
-    assert desc == "Python source file."
-    assert tags == ["python", "source"]
+    # Source files (.py, .js, …) are NOT recognized — they stay blank so
+    # `quack generate` can produce content-aware descriptions.
+    assert recognize.recognize_file("src/app/main.py") is None
+    # Extension fallback for a config-format file.
+    desc, tags = recognize.recognize_file("config/settings.toml")
+    assert "TOML" in desc
+    assert "toml" in tags
     # Glob match for a lockfile (no exact entry, not an extension we list).
     desc, tags = recognize.recognize_file("uv.lock")
     assert "lockfile" in tags
@@ -52,9 +55,9 @@ def test_recognize_folder_known_and_unknown():
 
 
 def test_recognize_tags_are_fresh_copies():
-    _, tags1 = recognize.recognize_file("a.py")
+    _, tags1 = recognize.recognize_file("a.toml")
     tags1.append("mutated")
-    _, tags2 = recognize.recognize_file("b.py")
+    _, tags2 = recognize.recognize_file("b.toml")
     assert "mutated" not in tags2
 
 
@@ -79,11 +82,11 @@ def test_recognition_is_lowest_precedence(tmp_path):
     space = Space.load(str(root))
     by_rel = {e.rel: e for e in space.entries}
 
-    # Recognition default (no authored, no frontmatter).
+    # Source files (.py) have no recognition default — blank so generate fills them.
     mod = by_rel["src/mod.py"]
-    assert mod.description == "Python source file."
-    assert mod.tags == ["python", "source"]
-    assert mod.described_at == ""  # derived ⇒ blank
+    assert mod.description == ""
+    assert mod.tags == []
+    assert mod.described_at == ""
     assert mod.stale is False
 
     # Frontmatter beats recognition.
@@ -94,10 +97,9 @@ def test_recognition_is_lowest_precedence(tmp_path):
 
 
 def test_prose_markdown_is_not_recognized_so_notes_stay_generatable(tmp_path):
-    """Prose extensions (.md/.txt) get no recognition default, so a note has a
-    blank description and `quack generate` will still describe it. Source files
-    keep their recognition default. Frontmatter still wins for a .md that has
-    one."""
+    """Prose extensions (.md/.txt) and source files (.py, .js, …) get no
+    recognition default — they stay blank so `quack generate` produces
+    content-aware descriptions. Frontmatter still wins for a .md that has one."""
     root = scaffold_root(str(tmp_path / "space"))
     (root / "notes").mkdir()
     (root / "notes" / "plain.md").write_text("# Plain\n\njust text\n")
@@ -116,7 +118,7 @@ def test_prose_markdown_is_not_recognized_so_notes_stay_generatable(tmp_path):
     assert described.description == "Hand-written note"  # frontmatter wins
     assert described.tags == ["topic"]
 
-    assert by_rel["notes/mod.py"].description == "Python source file."  # recognized
+    assert by_rel["notes/mod.py"].description == ""  # not recognized → generate-able
 
 
 def test_authored_beats_recognition_and_promotes(tmp_path):
@@ -163,9 +165,14 @@ def test_recognition_default_re_derives_and_second_reindex_is_noop(tmp_path):
     assert result["folder_indexes"] == 0  # idempotent no-op
 
     space = Space.load(str(root))
+    # .gitignore is recognized by exact name and must re-derive (not be authored).
+    gitignore = next(e for e in space.entries if e.rel == "src/.gitignore")
+    assert gitignore.description != ""  # still has recognition default
+    assert gitignore.described_at == ""  # never promoted to authored
+    # .py files have no recognition default — they stay blank.
     mod = next(e for e in space.entries if e.rel == "src/mod.py")
-    assert mod.description == "Python source file."  # still the recognition default
-    assert mod.described_at == ""  # never promoted to authored
+    assert mod.description == ""
+    assert mod.described_at == ""
 
 
 def test_set_meta_directory_section_is_preserved(tmp_path):
