@@ -306,6 +306,58 @@ def test_opaque_dir_is_mentioned_but_not_indexed(tmp_path):
     assert mine[0][0] == 1
 
 
+def test_unity_generated_dirs_are_walked_but_not_embedded(tmp_path):
+    """Unity's generated trees (Library/, Temp/, …) are walked and indexed — so
+    their files stay findable by name and full-text search — but their files are
+    never embedded (no wasted semantic vectors)."""
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "Library" / "metadata").mkdir(parents=True)
+    (root / "Library" / "metadata" / "cache.txt").write_text("import cache\n")
+    (root / "Assets").mkdir()
+    (root / "Assets" / "Player.cs").write_text("// player\n")
+    reindex(str(root))
+
+    # Files under Library/ ARE indexed (descended into, unlike opaque dirs).
+    _, inside = catalog.query(
+        "SELECT count(*) FROM files WHERE rel LIKE 'Library/%'",
+        explicit_root=str(root),
+    )
+    assert inside[0][0] == 1
+
+    # ...but they are not embeddable, while real source under Assets/ is.
+    space = Space.load(str(root))
+    by_rel = {e.rel: e for e in space.entries}
+    assert catalog.embeddable(by_rel["Library/metadata/cache.txt"]) is False
+    assert catalog.embeddable(by_rel["Assets/Player.cs"]) is True
+
+
+def test_git_dir_is_opaque_not_hidden(tmp_path):
+    """.git (and similar VCS/tool metadata) is acknowledged as a folder but never
+    descended into — moved from hidden to opaque so an agent knows it exists."""
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / ".git" / "objects").mkdir(parents=True)
+    (root / ".git" / "config").write_text("[core]\n")
+    (root / ".git" / "objects" / "deadbeef").write_text("blob\n")
+    (root / "main.py").write_text("print('hi')\n")
+    reindex(str(root))
+
+    # .git is recorded as a folder, marked opaque...
+    _, frows = catalog.query(
+        "SELECT kind FROM folders WHERE folder = '.git'", explicit_root=str(root)
+    )
+    assert frows and frows[0][0] == "opaque"
+    # ...but nothing inside it is indexed or walked.
+    _, inside = catalog.query(
+        "SELECT count(*) FROM files WHERE rel LIKE '.git/%'", explicit_root=str(root)
+    )
+    assert inside[0][0] == 0
+    _, deep = catalog.query(
+        "SELECT count(*) FROM folders WHERE folder LIKE '.git/%'",
+        explicit_root=str(root),
+    )
+    assert deep[0][0] == 0
+
+
 def test_cache_dirs_are_hidden_entirely(tmp_path):
     root = scaffold_root(str(tmp_path / "space"))
     cache = root / "pkg" / "__pycache__"
@@ -326,8 +378,8 @@ def test_cache_dirs_are_hidden_entirely(tmp_path):
 # catalog folders table + schema version — MAR-119
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_4():
-    assert catalog.SCHEMA_VERSION == 4
+def test_schema_version_is_5():
+    assert catalog.SCHEMA_VERSION == 5
 
 
 def test_folders_table_parent_mapping(tmp_path):
@@ -509,6 +561,31 @@ def test_embedding_text_includes_file_metadata(tmp_path):
     assert "description: Login flow" in text
     assert "links: target" in text
     assert "body:\nBody words" in text
+
+
+def test_embeddable_skips_non_text_and_asset_files(tmp_path):
+    """Non-text/binary and content-free files get no embedding vector at all
+    (stricter than bodyless), unless they carry a real description."""
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "art").mkdir()
+    (root / "art" / "logo.png").write_text("not really a png\n")   # asset extension
+    (root / "art" / "logo.png.meta").write_text("guid: abc\n")     # Unity sidecar
+    (root / "art" / "icon.png").write_text("blob\n")               # will be described
+    (root / "src").mkdir(exist_ok=True)
+    (root / "src" / "app.py").write_text("x = 1\n")                # text source
+    reindex(str(root))
+
+    # A described asset is worth embedding despite its type.
+    from quack.generate import record
+    record(str(root), "art/icon.png", "The app icon", ["brand"])
+
+    space = Space.load(str(root))
+    by_rel = {e.rel: e for e in space.entries}
+
+    assert catalog.embeddable(by_rel["art/logo.png"]) is False       # image
+    assert catalog.embeddable(by_rel["art/logo.png.meta"]) is False  # .meta sidecar
+    assert catalog.embeddable(by_rel["src/app.py"]) is True          # source text
+    assert catalog.embeddable(by_rel["art/icon.png"]) is True        # description overrides
 
 
 def test_embedding_text_includes_folder_metadata(tmp_path):

@@ -24,25 +24,27 @@ from fnmatch import fnmatch
 # Marker directory that identifies a quack root (like .git for a repo).
 MARKER_DIR = ".quack"
 
-# Always-ignored dirs: quack state plus pure noise/derived caches. These are
-# never walked and never appear in the meta layer. Users extend this with a
-# `.quackignore` file at the root.
+# Always-ignored dirs: quack's own state plus pure derived caches. These are
+# never walked and never appear in the meta layer — acknowledging them would be
+# noise. Users extend this with a `.quackignore` file at the root.
 DEFAULT_IGNORED_DIRS = {
-    ".quack", ".obsidian", ".git", ".trash",
+    ".quack", ".trash",
     "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".cache",
-    ".idea", ".ipynb_checkpoints",
+    ".ipynb_checkpoints",
 }
 
-# Opaque dirs: heavy, unambiguous vendored/dependency/virtualenv trees. We
-# acknowledge the folder in the meta layer (so an LLM knows it exists) but never
-# descend into it — its files are not indexed, keeping the catalog focused on
-# the user's own work. Only names that are essentially never real content live
-# here; ambiguous build outputs (build/dist/target) are left to `.quackignore`
-# so quack never silently skips a user's own folder. A `.quackignore` match
-# still wins and hides a dir entirely.
+# Opaque dirs: acknowledged in the meta layer (so an agent knows the folder
+# exists) but never descended into — their files are not indexed. Two kinds
+# live here: heavy vendored/dependency/virtualenv trees, and VCS/tool metadata
+# dirs (.git, .obsidian, .idea) that are worth knowing about but whose internals
+# are not the user's content. Only names that are essentially never hand-authored
+# content belong here; ambiguous build outputs (build/dist/target) are left to
+# `.quackignore` so quack never silently skips a user's own folder. A
+# `.quackignore` match still wins and hides a dir entirely.
 DEFAULT_OPAQUE_DIRS = {
     "site-packages", "node_modules", "bower_components",
     ".venv", "venv", "virtualenv", ".tox", ".eggs",
+    ".git", ".obsidian", ".idea",
 }
 
 @dataclass(frozen=True)
@@ -483,6 +485,7 @@ def walk(
     datasets_out: dict[str, str] | None = None,
     body_max_bytes: int = TEXT_BODY_MAX_BYTES,
     opaque_dirs: "frozenset[str] | None" = None,
+    opaque_out: "set[str] | None" = None,
 ) -> tuple[list[Entry], list[Path]]:
     """One filesystem pass → (entries, folders).
 
@@ -506,6 +509,14 @@ def walk(
         base = Path(dirpath)
         record, descend = _level(base, dirnames, root, patterns, opaque_dirs)
         folders.extend(record)
+        if opaque_out is not None:
+            # Recorded but not descended ⇒ opaque (its name was pruned from the
+            # descend list). record/descend are per-level so the name match is
+            # unambiguous within this directory.
+            descend_set = set(descend)
+            for p in record:
+                if p.name not in descend_set:
+                    opaque_out.add(p.relative_to(root).as_posix())
         dirnames[:] = descend
         kept, reason = _filter_dir(base, filenames, root, patterns, policy)
         if reason:
@@ -640,6 +651,9 @@ class Space:
     folders: list[Path] = field(default_factory=list)
     # rel → reason for folders skipped as datasets; files not in ``entries``.
     datasets: dict[str, str] = field(default_factory=dict)
+    # rels of folders recorded but not descended into (opaque: vendored deps,
+    # VCS/tool metadata). Their files are not indexed; the folder is still listed.
+    opaque: set[str] = field(default_factory=set)
 
     @classmethod
     def load(
@@ -674,16 +688,19 @@ class Space:
         if progress is not None:
             progress(0, 1, "Loading file contents")
         datasets: dict[str, str] = {}
+        opaque: set[str] = set()
         entries, folders = walk(
             root, on_file=on_file, dataset_policy=policy, datasets_out=datasets,
-            body_max_bytes=body_max_bytes, opaque_dirs=opaque_dirs,
+            body_max_bytes=body_max_bytes, opaque_dirs=opaque_dirs, opaque_out=opaque,
         )
         if progress is not None:
             progress(0, 1, "Applying metadata")
         _overlay(root, entries)
         if progress is not None:
             progress(1, 1, "Applied metadata")
-        return cls(root=root, entries=entries, folders=folders, datasets=datasets)
+        return cls(
+            root=root, entries=entries, folders=folders, datasets=datasets, opaque=opaque
+        )
 
     @cached_property
     def by_name(self) -> dict[str, Entry]:

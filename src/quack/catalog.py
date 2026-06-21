@@ -38,12 +38,51 @@ from .config import (
     DEFAULT_BODYLESS_EMBED_TAGS,
     DEFAULT_EMBED_BODY_CHAR_LIMIT,
     DEFAULT_EMBED_TEXT_CHAR_LIMIT,
+    DEFAULT_NONEMBEDDABLE_DIRS,
+    DEFAULT_NONEMBEDDABLE_EXTENSIONS,
+    DEFAULT_NONEMBEDDABLE_TAGS,
     EmbedConfig,
 )
 from .core import Space, find_root
 
 DB_NAME = "quack.duckdb"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+
+
+def embeddable(
+    entry,
+    nonembeddable_extensions: frozenset = DEFAULT_NONEMBEDDABLE_EXTENSIONS,
+    nonembeddable_tags: frozenset = DEFAULT_NONEMBEDDABLE_TAGS,
+    nonembeddable_dirs: frozenset = DEFAULT_NONEMBEDDABLE_DIRS,
+) -> bool:
+    """Whether a file should get a semantic vector at all.
+
+    Three things make a file non-embeddable:
+    - it lives under a non-embeddable folder (a large regenerated tree like a
+      Unity project's `Library/` — still indexed and findable, just not embedded);
+    - it is a non-text/binary asset (image, audio, archive, font, database,
+      tensor) or a content-free sidecar; such files carry no semantic signal
+      beyond their path, which the structural and full-text tiers already cover.
+
+    Either way embedding them is a wasted model call and a wasted vector, and
+    skipping them is what keeps an asset-heavy tree from ballooning the embed run
+    to hundreds of thousands of items.
+
+    A described file overrides the skip: if it has an authored or generated
+    description, that text is real signal worth embedding regardless of type or
+    location."""
+    if entry.description:
+        return True
+    rel = getattr(entry, "rel", "") or ""
+    if any(part in nonembeddable_dirs for part in rel.split("/")[:-1]):
+        return False
+    if getattr(entry, "is_binary", False):
+        return False
+    if entry.ext in nonembeddable_extensions:
+        return False
+    if nonembeddable_tags.intersection(entry.tags):
+        return False
+    return True
 
 
 def embeds_body(
@@ -314,7 +353,7 @@ def build(
     folder_rows = [
         (
             i.rel, i.parent, i.description, i.n_files, i.diagram, i.described_at,
-            folder_hashes.get(i.rel, ""),
+            folder_hashes.get(i.rel, ""), i.kind,
         )
         for i in folder_infos.values()
         if not i.is_root
@@ -472,7 +511,7 @@ def update_light(
         folder_rows = [
             (
                 i.rel, i.parent, i.description, i.n_files, i.diagram, i.described_at,
-                folder_hashes.get(i.rel, ""),
+                folder_hashes.get(i.rel, ""), i.kind,
             )
             for i in folder_infos.values()
             if not i.is_root
@@ -526,8 +565,10 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             n_files     INTEGER,
             diagram     VARCHAR,
             described_at VARCHAR,
-            embed_source_hash VARCHAR
+            embed_source_hash VARCHAR,
+            kind        VARCHAR
         );
+        CREATE INDEX folders_kind_idx ON folders(kind);
         CREATE TABLE tags  (name VARCHAR, tag VARCHAR);
         CREATE TABLE links (src VARCHAR, dst VARCHAR, dst_exists BOOLEAN);
         CREATE TABLE _fts_shadow (
@@ -821,7 +862,7 @@ def folder_listing(
 
         def expand(folder: str, levels: int) -> dict:
             frows = con.execute(
-                "SELECT folder, description, n_files FROM folders "
+                "SELECT folder, description, n_files, kind FROM folders "
                 "WHERE parent = ? ORDER BY n_files DESC, folder",
                 [folder],
             ).fetchall()
@@ -832,9 +873,11 @@ def folder_listing(
             else:
                 visible = frows
             child_entries: list[dict] = []
-            for f, fdesc, fn in visible[:limit]:
+            for f, fdesc, fn, fkind in visible[:limit]:
                 n = subtree_counts.get(f, 0) if filtering else int(fn or 0)
                 entry = {"folder": f, "n_files": n}
+                if fkind and fkind != "normal":
+                    entry["kind"] = fkind
                 fdesc = (fdesc or "").strip()
                 if fdesc:
                     entry["description"] = fdesc

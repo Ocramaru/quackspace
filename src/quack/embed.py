@@ -31,6 +31,7 @@ from .catalog import (
     DB_NAME,
     db_path,
     embed_cache_hash,
+    embeddable,
     file_embed_text,
     folder_embed_text,
     invalidate,
@@ -41,6 +42,9 @@ from .config import (
     DEFAULT_BODYLESS_EMBED_EXTENSIONS,
     DEFAULT_BODYLESS_EMBED_TAGS,
     DEFAULT_EMBED_TEXT_CHAR_LIMIT,
+    DEFAULT_NONEMBEDDABLE_DIRS,
+    DEFAULT_NONEMBEDDABLE_EXTENSIONS,
+    DEFAULT_NONEMBEDDABLE_TAGS,
     Config,
     write_embed_config,
 )
@@ -513,8 +517,13 @@ def build_embeddings(
     cfg = config.embed
     bodyless_extensions = DEFAULT_BODYLESS_EMBED_EXTENSIONS | frozenset(cfg.bodyless_extensions)
     bodyless_tags = DEFAULT_BODYLESS_EMBED_TAGS | frozenset(cfg.bodyless_tags)
+    nonembeddable_extensions = DEFAULT_NONEMBEDDABLE_EXTENSIONS | frozenset(cfg.nonembeddable_extensions)
+    nonembeddable_tags = DEFAULT_NONEMBEDDABLE_TAGS | frozenset(cfg.nonembeddable_tags)
+    nonembeddable_dirs = DEFAULT_NONEMBEDDABLE_DIRS | frozenset(cfg.nonembeddable_dirs)
     file_items = []
     for e in space.entries:
+        if not embeddable(e, nonembeddable_extensions, nonembeddable_tags, nonembeddable_dirs):
+            continue
         text = _embedding_input(
             file_embed_text(
                 e,

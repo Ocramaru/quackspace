@@ -825,7 +825,15 @@ def _add_listing_nodes(node, listing: dict, include_files: bool) -> None:
     for f in listing.get("folders", []):
         leaf = f["folder"].rsplit("/", 1)[-1] or f["folder"]
         label = Text(f"{leaf}/ ")
-        label.append(f"({f['n_files']})", style="cyan")
+        kind = f.get("kind")
+        if kind == "opaque":
+            # Recorded but not descended into — its files are not indexed, so a
+            # "(0)" count would read as "empty". Say so explicitly instead.
+            label.append("ignored", style="yellow")
+        elif kind == "dataset":
+            label.append("dataset", style="yellow")
+        else:
+            label.append(f"({f['n_files']})", style="cyan")
         if f.get("description"):
             label.append(f"  {f['description']}", style="dim")
         _add_listing_nodes(node.add(label), f, include_files)

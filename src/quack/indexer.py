@@ -124,10 +124,15 @@ def write_map(space: Space, folder_infos: dict[str, FolderInfo]) -> Path:
     tree: dict[str, dict] = {}
     for rel in sorted(r for r in folder_infos if r != ""):
         info = folder_infos[rel]
-        entry: dict = {
-            "description": info.description or "(no description)",
-            "files": info.n_files,
-        }
+        entry: dict = {"description": info.description or "(no description)"}
+        # Opaque/dataset folders have no indexed files by design, so a bare
+        # "files: 0" reads as "empty". Say why instead.
+        if info.kind == "opaque":
+            entry["status"] = "ignored (not descended)"
+        elif info.kind == "dataset":
+            entry["status"] = "dataset (not indexed)"
+        else:
+            entry["files"] = info.n_files
         if info.diagram:
             entry["diagram"] = info.diagram
         if info.types:

@@ -231,8 +231,12 @@ def map(
     """Directory listing of a folder: its child `folders` and the `files`
     directly in it. A folder entry is `{folder, n_files, ...}`; a file entry is
     `{rel}` (its basename is the filename); both carry `description` only when
-    one exists. Feed a `folder` back as `map(parent='<folder>')`, or a file
-    `rel` to `file_meta`. `parent=''` is the top level.
+    one exists. A folder also carries `kind` when it is not a normal indexed
+    folder: `"opaque"` (recorded but not descended — vendored deps, .git; its
+    files are intentionally not indexed) or `"dataset"` (too many files to
+    index); for these `n_files` is 0 by design, not because the folder is empty.
+    Feed a `folder` back as `map(parent='<folder>')`, or a file `rel` to
+    `file_meta`. `parent=''` is the top level.
 
     This doubles as a structural search — combine the params to ask precise
     questions ("where are the Go files?", "show me the big assets"):
@@ -524,8 +528,9 @@ def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
     """Run read-only SQL against the catalog. Tables: files(name, rel, folder,
     ext, description, tags_csv, n_links, n_inbound, is_orphan, is_binary,
     file_modified, described_at, stale), folders(folder, parent,
-    description, n_files, diagram, described_at) — the direct subfolders of X
-    are WHERE parent = 'X' (root is ''), tags(name, tag),
+    description, n_files, diagram, described_at, kind) — the direct subfolders
+    of X are WHERE parent = 'X' (root is ''); folders.kind is 'normal',
+    'opaque' (not descended), or 'dataset' (not indexed). tags(name, tag),
     links(src, dst, dst_exists). Results are capped by `row_limit`; add SQL
     LIMIT clauses for more precise queries.
 

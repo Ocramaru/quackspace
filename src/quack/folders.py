@@ -41,6 +41,10 @@ class FolderInfo:
     types: dict[str, int] = field(default_factory=dict)  # ext → direct-file count
     tag_rollup: list[str] = field(default_factory=list)  # top child tags
     is_root: bool = False
+    # "normal" | "opaque" (recorded, not descended) | "dataset" (recorded, files
+    # not indexed). Lets every consumer distinguish a real empty folder from one
+    # whose files were deliberately skipped.
+    kind: str = "normal"
 
 
 def _folder_md_description(folder: Path) -> str:
@@ -104,7 +108,11 @@ def _build_info(space: Space, rel: str, files: list, tag_rollup_limit: int = DEF
     # here, marked so an agent knows what it is: a derived description when none
     # was authored, plus a `dataset` tag for filtering. n_files stays 0 because
     # no file rows exist — the reason string carries the real magnitude.
-    if not is_root and rel in space.datasets:
+    kind = "normal"
+    if not is_root and rel in space.opaque:
+        kind = "opaque"
+    elif not is_root and rel in space.datasets:
+        kind = "dataset"
         if not desc:
             desc = f"Dataset: {space.datasets[rel]}, not indexed."
         if "dataset" not in tags:
@@ -132,6 +140,7 @@ def _build_info(space: Space, rel: str, files: list, tag_rollup_limit: int = DEF
         types=dict(types),
         tag_rollup=[t for t, _ in tag_counts.most_common(tag_rollup_limit)],
         is_root=is_root,
+        kind=kind,
     )
 
 
