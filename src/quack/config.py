@@ -73,6 +73,22 @@ DEFAULT_BODYLESS_EMBED_EXTENSIONS: frozenset[str] = frozenset({
     "woff", "woff2", "xls", "xlsx", "zip",
 })
 
+# Default prompt template for `quack generate`. Use {path}, {ext}, {content} as
+# placeholders — all other { } characters are treated literally (no escaping needed).
+DEFAULT_GENERATE_PROMPT = """\
+Classify the following file for a search index. Output ONLY a JSON object on one
+line, no preamble and no code fences:
+{"description": "<one sentence, max 25 words>", "tags": ["<lowercase topic>", ...]}
+Use 1-5 short topical tags (language, role, domain). If the content is empty
+(binary file), infer from the path and type.
+
+Path: {path}
+Type: {ext}
+
+Content (may be truncated):
+{content}
+"""
+
 # Known assistants the setup selector offers. `binary` is what we probe for on
 # PATH; `command` is written into config.yaml. Order is the menu order.
 PROVIDERS: list[dict] = [
@@ -102,6 +118,7 @@ class AIConfig:
     command: str = ""
     timeout: int = DEFAULT_AI_TIMEOUT
     skip: bool = False  # user opted out of AI; never prompt to set it up again
+    generate_prompt: str = ""  # empty → DEFAULT_GENERATE_PROMPT at runtime
 
     @property
     def configured(self) -> bool:
@@ -111,6 +128,10 @@ class AIConfig:
     def uses_stdin(self) -> bool:
         """True when the prompt is piped on stdin rather than substituted."""
         return "{prompt}" not in self.command
+
+    @property
+    def resolved_generate_prompt(self) -> str:
+        return self.generate_prompt.strip() or DEFAULT_GENERATE_PROMPT
 
 
 @dataclass
@@ -200,6 +221,7 @@ class Config:
             command=str(ai_raw.get("command", "") or ""),
             timeout=int(ai_raw.get("timeout", DEFAULT_AI_TIMEOUT)),
             skip=bool(ai_raw.get("skip", False)),
+            generate_prompt=str(ai_raw.get("generate_prompt", "") or ""),
         )
         emb_raw = data.get("embed", {}) or {}
         embed = EmbedConfig(
@@ -382,6 +404,11 @@ def write_config(
         "  # Set skip: true to use Space without AI; descriptions stay manual and\n"
         "  # `quack generate` will not offer to set up an assistant.\n"
         f"  skip: {'true' if skip else 'false'}\n"
+        "  # Customize the prompt `quack generate` sends to the AI. Use {path},\n"
+        "  # {ext}, and {content} as placeholders; all other { } are literal.\n"
+        "  # Omit this key to use the built-in default prompt.\n"
+        "  # generate_prompt: |\n"
+        "  #   Classify the following file ...\n"
         "\n"
         "defaults:\n"
         "  # Agent-facing output defaults. Tool-call arguments and MCP serve flags\n"

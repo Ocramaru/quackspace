@@ -52,25 +52,17 @@ GLOB_FILES: list[tuple[str, tuple[str, list[str]]]] = [
 
 # (description, tags) keyed by lowercase extension (no dot). Lowest file match.
 EXTENSIONS: dict[str, tuple[str, list[str]]] = {
-    "py": ("Python source file.", ["python", "source"]),
-    "pyi": ("Python type stub.", ["python", "types"]),
-    "js": ("JavaScript source file.", ["javascript", "source"]),
-    "ts": ("TypeScript source file.", ["typescript", "source"]),
-    "tsx": ("TypeScript React component.", ["typescript", "react", "source"]),
-    "jsx": ("JavaScript React component.", ["javascript", "react", "source"]),
-    "sh": ("Shell script.", ["shell", "script"]),
-    "bash": ("Bash script.", ["shell", "script"]),
+    # Source-code extensions (py, js, ts, sh, …) are deliberately NOT recognized:
+    # a generic "Python source file." default would make `quack generate` skip every
+    # module without ever producing a useful, content-aware description. They stay
+    # blank so generate/describe fill in real descriptions. (Known special-purpose
+    # files like pyproject.toml and README.md are still recognized by exact name above.)
     "toml": ("TOML configuration file.", ["config", "toml"]),
     "yml": ("YAML configuration file.", ["config", "yaml"]),
     "yaml": ("YAML configuration file.", ["config", "yaml"]),
     "json": ("JSON data or configuration file.", ["config", "json"]),
     "ini": ("INI configuration file.", ["config", "ini"]),
     "cfg": ("Configuration file.", ["config"]),
-    # Prose extensions (md, rst, txt) are deliberately NOT recognized: their
-    # type says nothing about their content, and a generic default would make
-    # `quack generate` skip every note. They stay blank so generate/describe
-    # fill in real descriptions. (Known doc files like README.md are still
-    # recognized by exact name above.)
     "csv": ("Comma-separated tabular data.", ["data", "csv"]),
     "sql": ("SQL script.", ["sql", "database"]),
     "html": ("HTML document.", ["web", "html"]),

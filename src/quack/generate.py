@@ -36,19 +36,6 @@ def _clean(text: str) -> str:
     return text.lstrip("> ").strip()
 
 
-META_PROMPT = """\
-Classify the following file for a search index. Output ONLY a JSON object on one
-line, no preamble and no code fences:
-{{"description": "<one sentence, max 25 words>", "tags": ["<lowercase topic>", ...]}}
-Use 1-5 short topical tags (language, role, domain). If the content is empty
-(binary file), infer from the path and type.
-
-Path: {path}
-Type: {ext}
-
-Content (may be truncated):
-{content}
-"""
 
 
 def run_ai(config: Config, prompt: str) -> str:
@@ -193,8 +180,12 @@ def fill_descriptions(
         if progress is not None:
             progress(done, total, f"Generating {entry.rel}")
         content = entry.body.strip()[:4000] or "(empty or binary file)"
-        prompt = META_PROMPT.format(
-            path=entry.rel, ext=entry.ext or "(none)", content=content
+        template = config.ai.resolved_generate_prompt
+        prompt = (
+            template
+            .replace("{path}", entry.rel)
+            .replace("{ext}", entry.ext or "(none)")
+            .replace("{content}", content)
         )
         description, tags = _parse_meta(run_ai(config, prompt))
         if not description:
