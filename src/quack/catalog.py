@@ -9,7 +9,7 @@ search `ls` can't do.
 Schema:
     files(name, rel, folder, ext, title, description, tags_csv, n_links,
           n_inbound, is_orphan, is_binary, file_modified, described_at, stale,
-          body)
+          body, size)
     folders(folder, parent, description, n_files, diagram, described_at)
     tags(name, tag)                  -- one row per (file, tag)
     links(src, dst, dst_exists)      -- one row per wikilink edge
@@ -43,7 +43,7 @@ from .config import (
 from .core import Space, find_root
 
 DB_NAME = "quack.duckdb"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def embeds_body(
@@ -304,7 +304,7 @@ def build(
             e.description, ",".join(e.tags),
             len(e.links), n_in, n_in == 0 and len(e.links) == 0,
             e.is_binary, e.modified, e.described_at, e.stale, body,
-            embed_source_hash,
+            embed_source_hash, e.size,
         ))
         tag_rows.extend((e.name, tag) for tag in e.tags)
         link_rows.extend((e.name, dst, dst in names) for dst in e.links)
@@ -516,7 +516,8 @@ def _create_schema(con: duckdb.DuckDBPyConnection) -> None:
             described_at  VARCHAR,
             stale         BOOLEAN,
             body        VARCHAR,
-            embed_source_hash VARCHAR
+            embed_source_hash VARCHAR,
+            size        BIGINT
         );
         CREATE TABLE folders (
             folder      VARCHAR,
@@ -728,6 +729,170 @@ def query(sql: str, explicit_root: str | None = None) -> tuple[list[str], list[t
         return cols, cur.fetchall()
     finally:
         con.close()
+
+
+# Auto-depth: when no explicit depth is given, expand deeper while the view
+# still holds fewer than this many items, so a sparse/filtered listing naturally
+# descends to reveal content instead of stopping at a near-empty top level.
+AUTO_LISTING_ITEMS = 50
+MAX_AUTO_LISTING_DEPTH = 10
+
+
+def folder_listing(
+    explicit_root: str | None = None,
+    parent: str = "",
+    *,
+    depth: int | None = 1,
+    include_files: bool = True,
+    exts: "set[str] | None" = None,
+    min_size: int | None = None,
+    max_size: int | None = None,
+    limit: int = 100,
+    auto_items: int | None = None,
+) -> dict:
+    """One-level (or deeper, via *depth*) directory listing of *parent*.
+
+    Returns the parent's direct files and its child folders, each recursively
+    expanded up to *depth* levels of subfolders. Shape (recursive):
+
+        {parent, files_here, child_count, truncated, files_truncated,
+         folders: [{folder, n_files, description?, folders?, files?}, ...],
+         files:   [{rel, description?}, ...]}
+
+    With no filter, folder `n_files` is the folder's structural file count. When
+    an *exts* / *min_size* / *max_size* filter is active, the listing is scoped
+    to it: folders with no matching file anywhere in their subtree are pruned,
+    and each folder's `n_files` (and `files_here`) becomes the count of matching
+    files in its subtree. Each level is capped at *limit*.
+
+    *depth* is the number of folder levels to expand; pass ``None`` to auto-fit
+    — expand deeper while the listing holds fewer than ``AUTO_LISTING_ITEMS``
+    entries (capped at ``MAX_AUTO_LISTING_DEPTH``). The chosen depth is returned
+    as ``depth`` in the result.
+    """
+    parent = (parent or "").strip("/")
+
+    where = ""
+    fparams: list = []
+    if exts:
+        where += " AND ext IN (" + ",".join("?" * len(exts)) + ")"
+        fparams.extend(sorted(exts))
+    if min_size is not None:
+        where += " AND size >= ?"
+        fparams.append(int(min_size))
+    if max_size is not None:
+        where += " AND size <= ?"
+        fparams.append(int(max_size))
+    filtering = bool(where)
+
+    con = connect(explicit_root)
+    try:
+        # When filtering, roll matching-file counts up to every ancestor folder.
+        # subtree_counts keys are exactly the folders worth showing (those whose
+        # subtree contains a match); its values are the per-subtree match counts.
+        direct_counts: dict[str, int] = {}
+        subtree_counts: dict[str, int] = {}
+        if filtering:
+            for fol, cnt in con.execute(
+                f"SELECT folder, count(*) FROM files WHERE 1=1{where} GROUP BY folder",
+                fparams,
+            ).fetchall():
+                direct_counts[fol] = int(cnt)
+            for fol, cnt in direct_counts.items():
+                parts = fol.split("/")
+                for i in range(len(parts) + 1):
+                    anc = "/".join(parts[:i])
+                    subtree_counts[anc] = subtree_counts.get(anc, 0) + cnt
+
+        def files_for(folder: str) -> tuple[list[dict], bool]:
+            rows = con.execute(
+                f"SELECT rel, description FROM files WHERE folder = ?{where} "
+                "ORDER BY name LIMIT ?",
+                [folder, *fparams, limit + 1],
+            ).fetchall()
+            out: list[dict] = []
+            for rel, desc in rows[:limit]:
+                entry = {"rel": rel}
+                desc = (desc or "").strip()
+                if desc:
+                    entry["description"] = desc
+                out.append(entry)
+            return out, len(rows) > limit
+
+        def expand(folder: str, levels: int) -> dict:
+            frows = con.execute(
+                "SELECT folder, description, n_files FROM folders "
+                "WHERE parent = ? ORDER BY n_files DESC, folder",
+                [folder],
+            ).fetchall()
+            if filtering:
+                # Keep only branches that contain a match; biggest match first.
+                visible = [r for r in frows if subtree_counts.get(r[0], 0) > 0]
+                visible.sort(key=lambda r: (-subtree_counts[r[0]], r[0]))
+            else:
+                visible = frows
+            child_entries: list[dict] = []
+            for f, fdesc, fn in visible[:limit]:
+                n = subtree_counts.get(f, 0) if filtering else int(fn or 0)
+                entry = {"folder": f, "n_files": n}
+                fdesc = (fdesc or "").strip()
+                if fdesc:
+                    entry["description"] = fdesc
+                if levels > 1:  # descend another level into this child
+                    sub = expand(f, levels - 1)
+                    if sub["folders"]:
+                        entry["folders"] = sub["folders"]
+                    if include_files and sub["files"]:
+                        entry["files"] = sub["files"]
+                child_entries.append(entry)
+            files, files_trunc = files_for(folder) if include_files else ([], False)
+            return {
+                "child_count": len(visible),
+                "folders": child_entries,
+                "folders_truncated": len(visible) > limit,
+                "files": files,
+                "files_truncated": files_trunc,
+            }
+
+        def _count(nd: dict) -> int:
+            total = len(nd["folders"]) + len(nd["files"])
+            for f in nd["folders"]:
+                total += _count({"folders": f.get("folders", []), "files": f.get("files", [])})
+            return total
+
+        if filtering:
+            files_here = direct_counts.get(parent, 0)
+        else:
+            files_here = con.execute(
+                "SELECT count(*) FROM files WHERE folder = ?", [parent]
+            ).fetchone()[0]
+
+        if depth is None:  # auto-fit: deepen while the view stays sparse
+            target = auto_items if auto_items and auto_items > 0 else AUTO_LISTING_ITEMS
+            resolved_depth = 1
+            node = expand(parent, 1)
+            while resolved_depth < MAX_AUTO_LISTING_DEPTH and _count(node) < target:
+                deeper = expand(parent, resolved_depth + 1)
+                if _count(deeper) <= _count(node):
+                    break  # fully expanded; another level adds nothing
+                node = deeper
+                resolved_depth += 1
+        else:
+            resolved_depth = max(1, int(depth))
+            node = expand(parent, resolved_depth)
+    finally:
+        con.close()
+
+    return {
+        "parent": parent,
+        "depth": resolved_depth,
+        "files_here": int(files_here or 0),
+        "child_count": node["child_count"],
+        "truncated": node["folders_truncated"],
+        "files_truncated": node["files_truncated"],
+        "folders": node["folders"],
+        "files": node["files"],
+    }
 
 
 def _neighbours_query(

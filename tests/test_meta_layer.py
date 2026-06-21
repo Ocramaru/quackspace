@@ -319,8 +319,8 @@ def test_cache_dirs_are_hidden_entirely(tmp_path):
 # catalog folders table + schema version — MAR-119
 # ---------------------------------------------------------------------------
 
-def test_schema_version_is_3():
-    assert catalog.SCHEMA_VERSION == 3
+def test_schema_version_is_4():
+    assert catalog.SCHEMA_VERSION == 4
 
 
 def test_folders_table_parent_mapping(tmp_path):

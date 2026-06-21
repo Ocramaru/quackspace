@@ -193,6 +193,40 @@ def build_parser() -> argparse.ArgumentParser:
     p_diagram = sub.add_parser("diagram", help="regenerate Mermaid link diagrams only")
     _add_root_arg(p_diagram)
 
+    p_map = sub.add_parser("map", help="print the folder tree (folders + files) for a directory")
+    _add_root_arg(p_map)
+    p_map.add_argument(
+        "parent", nargs="?", default=None,
+        help="folder (relative to the root) to list (default: the folder you're in)",
+    )
+    p_map.add_argument(
+        "--at", default=None, metavar="PATH",
+        help="map at a filesystem path to a dir or file (a file maps its folder) — "
+             "handy for a path from `quack search`",
+    )
+    p_map.add_argument(
+        "-d", "--depth", type=int, default=None,
+        help="folder levels to expand (default: auto-fit to ~50 entries)",
+    )
+    p_map.add_argument(
+        "--folders-only", action="store_true", help="list folders only, no files"
+    )
+    p_map.add_argument(
+        "--ext", default="", metavar="EXTS",
+        help="only list files with these extensions (comma-separated, e.g. py,md)",
+    )
+    p_map.add_argument(
+        "--min-size", type=int, default=None, metavar="BYTES",
+        help="only list files at least this many bytes",
+    )
+    p_map.add_argument(
+        "--max-size", type=int, default=None, metavar="BYTES",
+        help="only list files at most this many bytes",
+    )
+    p_map.add_argument(
+        "-n", "--limit", type=int, default=None, help="max entries shown per level"
+    )
+
     p_clean = sub.add_parser(
         "clean", help="remove generated artifacts (catalog/map/diagrams)"
     )
@@ -748,6 +782,105 @@ def _incomplete_command(parser: argparse.ArgumentParser, args) -> argparse.Argum
         current = subparsers.choices[chosen]
 
 
+def _map_parent_from_args(args, root) -> str:
+    """Resolve which folder `quack map` should list, as a rel path under *root*.
+
+    Precedence: --at <fs path> (a file maps its folder) > positional parent
+    (a root-relative folder) > the folder you're standing in (cwd)."""
+    if getattr(args, "at", None) is not None:
+        p = Path(args.at).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        p = p.resolve()
+        if p.is_file():
+            p = p.parent
+        try:
+            rel = p.relative_to(root.resolve()).as_posix()
+        except ValueError:
+            raise RuntimeError(
+                f"--at path {args.at!r} is not inside the quack root {root}"
+            )
+        return "" if rel == "." else rel
+    if args.parent is not None:
+        return args.parent.strip("/")
+    try:  # default: the folder you're standing in
+        rel = Path.cwd().resolve().relative_to(root.resolve()).as_posix()
+        return "" if rel == "." else rel
+    except ValueError:
+        return ""  # cwd is outside the root — fall back to top level
+
+
+def _add_listing_nodes(node, listing: dict, include_files: bool) -> None:
+    """Render one `catalog.folder_listing` level onto a rich tree node, recursing
+    into nested folders. Subfolders (with `/` + count) first, then loose files."""
+    from rich.text import Text
+
+    for f in listing.get("folders", []):
+        leaf = f["folder"].rsplit("/", 1)[-1] or f["folder"]
+        label = Text(f"{leaf}/ ")
+        label.append(f"({f['n_files']})", style="cyan")
+        if f.get("description"):
+            label.append(f"  {f['description']}", style="dim")
+        _add_listing_nodes(node.add(label), f, include_files)
+    if listing.get("truncated"):
+        node.add(Text("… more folders (raise --limit)", style="dim"))
+    if include_files:
+        for fl in listing.get("files", []):
+            label = Text(fl["rel"].rsplit("/", 1)[-1] or fl["rel"])
+            if fl.get("description"):
+                label.append(f"  {fl['description']}", style="dim")
+            node.add(label)
+        if listing.get("files_truncated"):
+            node.add(Text("… more files (raise --limit)", style="dim"))
+
+
+def _run_map(args) -> int:
+    """Print a directory listing (folders + files) as a rich tree.
+
+    Human-facing companion to the MCP `map` tool: same catalog data
+    (`catalog.folder_listing`), rendered with tree connectors. Supports --depth,
+    --folders-only, --ext / --min-size / --max-size filters, and --at <path>.
+    """
+    from rich.console import Console
+    from rich.text import Text
+    from rich.tree import Tree
+
+    from . import catalog
+
+    root = find_root(args.root)
+    parent = _map_parent_from_args(args, root)
+    exts = {
+        e.strip().lstrip(".").lower()
+        for e in (args.ext or "").split(",")
+        if e.strip()
+    } or None
+    include_files = not args.folders_only
+
+    listing = catalog.folder_listing(
+        args.root,
+        parent,
+        depth=(args.depth if args.depth and args.depth > 0 else None),
+        include_files=include_files,
+        exts=exts,
+        min_size=args.min_size,
+        max_size=args.max_size,
+        limit=int(args.limit) if args.limit else 1000,
+        auto_items=Config.load(args.root).defaults.map_auto_items,
+    )
+
+    header = Text(parent or root.name or str(root))
+    note = f"  ({listing['files_here']} files here"
+    if args.depth is None and listing["depth"] > 1:
+        note += f", auto-expanded to depth {listing['depth']}"
+    header.append(note + ")", style="dim")
+    tree = Tree(header)
+    _add_listing_nodes(tree, listing, include_files)
+    if not listing["folders"] and not (include_files and listing["files"]):
+        tree.add(Text("(empty)", style="dim"))
+    Console().print(tree)
+    return 0
+
+
 def _dispatch(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1000,6 +1133,9 @@ def _dispatch(argv: list[str] | None) -> int:
         cols, rows = catalog.query(args.query, explicit_root=args.root)
         print(_format_table(cols, rows, csv=args.csv))
         return 0
+
+    if args.command == "map":
+        return _run_map(args)
 
     if args.command == "mcp":
         return _run_mcp(args)

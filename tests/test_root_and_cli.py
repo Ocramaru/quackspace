@@ -400,6 +400,7 @@ def test_write_config_preserves_existing_defaults(tmp_path):
         "search_limit": 4,
         "sql_row_limit": 5,
         "central_limit": 6,
+        "map_auto_items": 50,
         "rrf_k": 60,
         "weight_name": 10,
         "weight_tag": 6,
@@ -436,3 +437,87 @@ def test_config_loads_index_body_storage(tmp_path):
 
     assert loaded.index.store_body is False
     assert loaded.index.diagrams is False
+
+
+def test_map_cli_defaults_to_cwd_folder(tmp_path, capsys, monkeypatch):
+    """`quack map` lists the folder you're standing in (cwd-relative), and an
+    explicit folder argument overrides that."""
+    from quack.indexer import reindex
+    from quack.scaffold import scaffold_root
+
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "alpha" / "nested").mkdir(parents=True)
+    (root / "alpha" / "note.md").write_text("# a\n")
+    (root / "alpha" / "nested" / "deep.md").write_text("# d\n")
+    reindex(str(root))
+
+    # From the root (depth 1): top-level folders, not the nested one.
+    monkeypatch.chdir(root)
+    assert main(["map", "--depth", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "alpha" in out
+    assert "nested" not in out
+
+    # From inside alpha (depth 1): its child folders AND its loose files.
+    monkeypatch.chdir(root / "alpha")
+    assert main(["map", "--depth", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "nested" in out
+    assert "note.md" in out  # map lists files, not just folders
+
+    # Explicit argument overrides cwd: ask for alpha while standing at root.
+    monkeypatch.chdir(root)
+    assert main(["map", "alpha"]) == 0
+    out = capsys.readouterr().out
+    assert "nested" in out
+
+
+def test_map_cli_at_path_and_depth(tmp_path, capsys, monkeypatch):
+    """`quack map --at <file>` maps the file's folder; --depth nests subfolders."""
+    from quack.indexer import reindex
+    from quack.scaffold import scaffold_root
+
+    root = scaffold_root(str(tmp_path / "space"))
+    deep = root / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    (deep / "f.md").write_text("hi")
+    reindex(str(root))
+    monkeypatch.chdir(root)
+
+    # --at a deeply nested FILE lists that file's folder.
+    assert main(["map", "--at", str(deep / "f.md")]) == 0
+    out = capsys.readouterr().out
+    assert "a/b/c" in out  # header is the file's folder
+    assert "f.md" in out
+
+    # --at outside the root is rejected.
+    assert main(["map", "--at", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "not inside the quack root" in err
+
+    # --depth nests subfolders into one tree.
+    assert main(["map", "--depth", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "a/" in out and "b/" in out and "c/" in out
+
+
+def test_map_auto_items_is_configurable(tmp_path):
+    """defaults.map_auto_items drives `quack map` auto-depth."""
+    from quack import catalog
+    from quack.config import Config
+    from quack.indexer import reindex
+    from quack.scaffold import scaffold_root
+
+    root = scaffold_root(str(tmp_path / "space"))
+    deep = root / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    for i in range(8):
+        (deep / f"f{i}.py").write_text("p")
+    reindex(str(root))
+
+    assert Config.load(str(root)).defaults.map_auto_items == 50  # default
+
+    # A tiny budget stops auto-depth shallow; a bigger one descends to the files.
+    shallow = catalog.folder_listing(str(root), "", depth=None, exts={"py"}, auto_items=2)
+    deeper = catalog.folder_listing(str(root), "", depth=None, exts={"py"}, auto_items=50)
+    assert shallow["depth"] < deeper["depth"]

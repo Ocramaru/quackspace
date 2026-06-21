@@ -30,6 +30,7 @@ MARKER_DIR = ".quack"
 DEFAULT_IGNORED_DIRS = {
     ".quack", ".obsidian", ".git", ".trash",
     "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".cache",
+    ".idea", ".ipynb_checkpoints",
 }
 
 # Opaque dirs: heavy, unambiguous vendored/dependency/virtualenv trees. We
@@ -357,6 +358,15 @@ class Entry:
         """The file's mtime as an ISO-8601 second-precision string ('' if the
         file is gone). Refreshed every reindex."""
         return _mtime_iso(self.path)
+
+    @cached_property
+    def size(self) -> int:
+        """The file's size in bytes (0 if the file is gone). Refreshed every
+        reindex; used for size-based filtering in map/sql."""
+        try:
+            return self.path.stat().st_size
+        except OSError:
+            return 0
 
     @property
     def described_at(self) -> str:

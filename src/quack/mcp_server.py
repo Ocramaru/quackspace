@@ -21,10 +21,11 @@ from . import catalog
 from .config import (
     Config,
     DEFAULT_CENTRAL_LIMIT,
+    DEFAULT_MAP_AUTO_ITEMS,
     DEFAULT_SEARCH_LIMIT,
     DEFAULT_SQL_ROW_LIMIT,
 )
-from .core import find_root
+from .core import DEFAULT_OPAQUE_DIRS, find_root
 from .search import search as do_search
 
 INSTRUCTIONS = """\
@@ -32,9 +33,14 @@ This is quack, the meta layer over a directory of the user's work (notes, docs,
 code, configs, assets). Use it to find and navigate files precisely.
 
 How to navigate (cheapest first):
-1. `map` — folder-level overview. Shows folders, not files. To list files inside
-   a folder, follow up with sql("SELECT rel, name, description FROM files WHERE
-   folder = '<folder>' ORDER BY name"), then pass any `rel` to `file_meta`.
+1. `map()` — directory listing AND a structural search. Lists a folder's child
+   `folders` and the `files` in it (top level when `parent=''`); descend with
+   `map(parent='<folder>')`. Also answers "where is X?" via filters: `ext`
+   (e.g. "py,md") and/or `min_size`/`max_size` prune the tree to just the
+   folders containing matches, with counts that reflect the filter — so
+   `map(ext="go")` shows only the Go parts of the tree. `depth` defaults to
+   auto (descends until ~50 entries; pass a number to fix it), `include_files`
+   can be turned off for a folders-only view. Pass any file `rel` to `file_meta`.
 2. `search` — auto-hybrid (keyword + full-text + semantic if available + graph
    neighbours). This is the default way to find files; you do not pick a mode.
 3. `file_meta` — description, tags, links, stale flag, and the absolute path for
@@ -62,7 +68,9 @@ All paths are RELATIVE to the quack root, which every result reports as `root`.
 tool without constructing paths yourself.
 
 Call `explain()` for a full architecture and data-flow reference, field semantics,
-and the catalog schema.
+and the catalog schema. On large or vendored-heavy roots, prefer scoped
+map/sql/search calls; use `.quackignore`, config `index.opaque_dirs`, or a
+narrower quack root/per-project indexing to keep generated dependencies out.
 """
 
 mcp = FastMCP("quack", instructions=INSTRUCTIONS)
@@ -70,6 +78,11 @@ mcp = FastMCP("quack", instructions=INSTRUCTIONS)
 MAX_SQL_ROW_LIMIT = 200
 MAX_SEARCH_LIMIT = 20
 MAX_CENTRAL_LIMIT = 50
+MAX_MAP_LIMIT = 100
+MAX_MAP_DEPTH = 5
+LARGE_ROOT_FILE_THRESHOLD = 10_000
+LARGE_ROOT_FOLDER_THRESHOLD = 1_000
+EDITOR_CACHE_DIRS = frozenset({".idea", ".ipynb_checkpoints"})
 
 
 @dataclass
@@ -77,6 +90,7 @@ class LimitDefaults:
     search: int = DEFAULT_SEARCH_LIMIT
     sql_rows: int = DEFAULT_SQL_ROW_LIMIT
     central: int = DEFAULT_CENTRAL_LIMIT
+    map_auto_items: int = DEFAULT_MAP_AUTO_ITEMS
 
 
 LIMITS = LimitDefaults()
@@ -107,6 +121,7 @@ def configure_limits(
         search=_clamp(search_limit, base.search, MAX_SEARCH_LIMIT),
         sql_rows=_clamp(sql_row_limit, base.sql_rows, MAX_SQL_ROW_LIMIT),
         central=_clamp(central_limit, base.central, MAX_CENTRAL_LIMIT),
+        map_auto_items=base.map_auto_items,
     )
     return LIMITS
 
@@ -127,6 +142,7 @@ def configure_limits_from_config(
             search=cfg.defaults.search_limit,
             sql_rows=cfg.defaults.sql_row_limit,
             central=cfg.defaults.central_limit,
+            map_auto_items=cfg.defaults.map_auto_items,
         ),
     )
 
@@ -157,30 +173,138 @@ def _query_limited(query: str, row_limit: int) -> tuple[list[str], list[tuple], 
         cur.close()
 
 
+def _catalog_counts() -> dict[str, int]:
+    cur = catalog.read_cursor(_root_arg())
+    try:
+        files = cur.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        folders = cur.execute("SELECT COUNT(*) FROM folders").fetchone()[0]
+        return {
+            "files": int(files or 0),
+            "folders": int(folders or 0),
+        }
+    finally:
+        cur.close()
+
+
+def _is_large_catalog(counts: dict[str, int]) -> bool:
+    return (
+        counts["files"] >= LARGE_ROOT_FILE_THRESHOLD
+        or counts["folders"] >= LARGE_ROOT_FOLDER_THRESHOLD
+    )
+
+
+def _configured_opaque_dirs() -> frozenset[str]:
+    try:
+        cfg = Config.load(_root_arg())
+        return DEFAULT_OPAQUE_DIRS | frozenset(cfg.index.opaque_dirs)
+    except Exception:
+        return DEFAULT_OPAQUE_DIRS
+
+
+def _path_has_dir(rel: str, names: set[str] | frozenset[str]) -> bool:
+    parts = rel.split("/")[:-1]
+    return any(p in names for p in parts)
+
+
+def _scope_guidance() -> str:
+    return (
+        "For large or dependency-heavy roots, add generated/vendor directories to "
+        "`.quackignore` or config `index.opaque_dirs`, or run quack per project with "
+        "a narrower root."
+    )
+
+
 def _root() -> str:
     return SERVER_ROOT or configure_root(None)
 
 
 @mcp.tool()
-def map() -> dict[str, Any]:
-    """Folder-level overview of the root: each folder with its file count and
-    description. Start here to decide which folder is relevant, then call
-    file_meta or search to go deeper."""
-    cols, rows = catalog.query_shared(
-        "SELECT f.folder, count(*) AS files, fo.description "
-        "FROM files f LEFT JOIN folders fo ON f.folder = fo.folder "
-        "WHERE f.folder <> '' GROUP BY f.folder, fo.description ORDER BY files DESC",
-        explicit_root=_root_arg(),
+def map(
+    parent: str = "",
+    limit: int | None = None,
+    depth: int = 0,
+    include_files: bool = True,
+    ext: str = "",
+    min_size: int | None = None,
+    max_size: int | None = None,
+) -> dict[str, Any]:
+    """Directory listing of a folder: its child `folders` and the `files`
+    directly in it. A folder entry is `{folder, n_files, ...}`; a file entry is
+    `{rel}` (its basename is the filename); both carry `description` only when
+    one exists. Feed a `folder` back as `map(parent='<folder>')`, or a file
+    `rel` to `file_meta`. `parent=''` is the top level.
+
+    This doubles as a structural search — combine the params to ask precise
+    questions ("where are the Go files?", "show me the big assets"):
+
+    - `parent` (str): folder to list, relative to the root (e.g. "src/app").
+    - `depth` (int): folder levels to expand; each level nests children's own
+      `folders`/`files` recursively. **Default 0 = auto** — expands deeper while
+      the view stays under ~50 entries, so a sparse/filtered listing descends to
+      reveal content instead of stopping at a near-empty top level. The depth
+      actually used is returned as `depth`. An explicit value is capped at 5.
+    - `include_files` (bool, default true): false → folders-only structural map.
+    - `ext` (str, comma-separated, e.g. "py,md"): only files with these
+      extensions. **Folders with no match in their subtree are pruned**, and
+      every `n_files`/`files_here` becomes that subtree's *match* count — so the
+      result is just the part of the tree that contains those files.
+    - `min_size` / `max_size` (int, bytes): same scoping, by file size.
+
+    `folders`/`files` are capped per level at `limit`; `child_count`/`files_here`
+    are the true (post-filter) totals and `truncated`/`files_truncated` flag the
+    cap (use sql for the full list). `total_files`/`total_folders` report catalog
+    scale. (The CLI `quack map` renders this as a tree, and `quack map --at
+    <path>` maps any dir/file path — handy for a path from search().)"""
+    limit = _clamp(limit, MAX_MAP_LIMIT, MAX_MAP_LIMIT)
+    # depth 0 (or negative) → auto-fit; an explicit level is capped at MAX_MAP_DEPTH.
+    depth_arg = None if (depth is None or int(depth) <= 0) else min(int(depth), MAX_MAP_DEPTH)
+    exts = {e.strip().lstrip(".").lower() for e in (ext or "").split(",") if e.strip()} or None
+    listing = catalog.folder_listing(
+        _root_arg(),
+        parent,
+        depth=depth_arg,
+        include_files=include_files,
+        exts=exts,
+        min_size=min_size,
+        max_size=max_size,
+        limit=limit,
+        auto_items=LIMITS.map_auto_items,
     )
+    counts = _catalog_counts()
+    tips = [
+        "Listing: `folders` are subfolders (descend with map(parent='<folder>') or raise `depth`), "
+        "`files` are the files directly here (pass a file `rel` to file_meta(path_or_name=rel)).",
+    ]
+    if listing["truncated"]:
+        tips.append(
+            f"Only {limit} of {listing['child_count']} child folders are shown; "
+            "use a narrower parent."
+        )
+    if listing["files_truncated"]:
+        tips.append(
+            f"Only {limit} of {listing['files_here']} files are shown; for the full list "
+            "use sql(\"SELECT rel, name FROM files WHERE folder = '<folder>' ORDER BY name\")."
+        )
+    if _is_large_catalog(counts):
+        tips.append(
+            f"This catalog is large ({counts['files']} files, {counts['folders']} folders); "
+            "avoid unbounded folder/file SQL and stay scoped by parent or folder."
+        )
+        tips.append(_scope_guidance())
     return {
         "root": _root(),
-        "folders": [dict(zip(cols, r)) for r in rows],
-        "next_steps": (
-            "Pick a folder, then use sql(\"SELECT rel, name, description FROM files "
-            "WHERE folder = '<folder>' ORDER BY name\") to list its files. "
-            "Pass any `rel` value to file_meta() to get metadata and the absolute path "
-            "for reading with your host file tool."
-        ),
+        "parent": listing["parent"],
+        "depth": listing["depth"],
+        "files_here": listing["files_here"],
+        "limit": limit,
+        "child_count": listing["child_count"],
+        "total_files": counts["files"],
+        "total_folders": counts["folders"],
+        "truncated": listing["truncated"],
+        "files_truncated": listing["files_truncated"],
+        "folders": listing["folders"],
+        "files": listing["files"],
+        "next_steps": " ".join(tips),
     }
 
 
@@ -242,6 +366,28 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
                 "with your host file tool before relying on the description."
             )
         next_steps = " ".join(tips)
+
+    counts = _catalog_counts()
+    extra_tips = []
+    if (hits and len(hits) >= limit) or (folder_hits and len(folder_hits) >= limit):
+        extra_tips.append(
+            f"Results are capped at limit={limit}; on large roots, narrow the query "
+            "with distinctive terms or use map(parent='<folder>')/folder-scoped SQL first."
+        )
+    if _is_large_catalog(counts) and (hits or folder_hits):
+        extra_tips.append(
+            f"This catalog is large ({counts['files']} files, {counts['folders']} folders); "
+            "prefer scoped search terms and folder filters over broad queries."
+        )
+    noisy_dirs = _configured_opaque_dirs() | EDITOR_CACHE_DIRS
+    noisy_hits = [h.entry.rel for h in hits if _path_has_dir(h.entry.rel, noisy_dirs)]
+    if noisy_hits:
+        extra_tips.append(
+            "Some hits are under editor/cache or opaque dependency directories. "
+            + _scope_guidance()
+        )
+    if extra_tips:
+        next_steps = " ".join([next_steps, *extra_tips])
 
     return {
         "root": _root(),
@@ -401,10 +547,12 @@ def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
         "row_limit": row_limit,
         "truncated": truncated,
     }
+    counts = _catalog_counts()
     if truncated:
         result["next_steps"] = (
-            f"Result capped at {row_limit} rows. Add a SQL LIMIT clause "
-            f"or pass a higher row_limit (max {MAX_SQL_ROW_LIMIT}) to get more. "
+            f"Result capped at {row_limit} rows and may be too large for MCP context. "
+            "Narrow the WHERE clause, use parent-scoped folder queries "
+            "(folders.parent = '<folder>'), or use map(parent='<folder>') first. "
             "If rows contain files.rel, pass that value to file_meta(path_or_name=rel) for metadata and absolute_path."
         )
     else:
@@ -412,6 +560,11 @@ def sql(query: str, row_limit: int | None = None) -> dict[str, Any]:
             "If records contain a `rel` field, pass it to file_meta(path_or_name=rel) "
             "to get metadata and absolute_path for reading with your host file tool."
         )
+        if _is_large_catalog(counts):
+            result["next_steps"] += (
+                f" This catalog is large ({counts['files']} files, {counts['folders']} folders); "
+                "avoid unbounded SELECTs and prefer folder/parent filters."
+            )
     return result
 
 
@@ -460,18 +613,38 @@ def graph_path(src: str, dst: str) -> dict[str, Any]:
 def central(limit: int | None = None) -> dict[str, Any]:
     """Most-connected files (hubs) by wikilink degree. Use when you want
     important or heavily-referenced files rather than keyword-relevant ones —
-    hubs are natural starting points for exploring an unfamiliar space."""
+    hubs are natural starting points for exploring an unfamiliar space.
+    Files under configured opaque dependency/cache dirs are excluded."""
     limit = _clamp(limit, LIMITS.central, MAX_CENTRAL_LIMIT)
-    rows = graph_mod.centrality(explicit_root=_root_arg(), limit=limit)
+    opaque_dirs = _configured_opaque_dirs()
+    rows = graph_mod.centrality(
+        explicit_root=_root_arg(),
+        limit=limit,
+        exclude_dir_names=opaque_dirs,
+    )
+    counts = _catalog_counts()
+    tips = [
+        "Call file_meta(path_or_name=path) on any hub for metadata and absolute_path, "
+        "then read with your host file tool. Or call graph_path(src, dst) to trace connections."
+    ]
+    if _is_large_catalog(counts):
+        tips.append(
+            "On large roots, centrality can still surface generated/vendor noise if those "
+            "dirs were indexed; add them to `.quackignore` or config `index.opaque_dirs`, "
+            "then reindex."
+        )
+    if len(rows) >= limit:
+        tips.append(
+            f"Hubs are capped at limit={limit}; use search() or folder-scoped SQL when "
+            "you already know the area you care about."
+        )
     return {
         "root": _root(),
         "limit": limit,
         "max_limit": MAX_CENTRAL_LIMIT,
+        "excluded_opaque_dirs": sorted(opaque_dirs),
         "hubs": [{"name": n, "path": r, "degree": d} for n, r, d in rows],
-        "next_steps": (
-            "Call file_meta(path_or_name=path) on any hub for metadata and absolute_path, "
-            "then read with your host file tool. Or call graph_path(src, dst) to trace connections."
-        ),
+        "next_steps": " ".join(tips),
     }
 
 
@@ -660,6 +833,13 @@ def explain() -> dict[str, Any]:
             "tags": "name, tag",
             "links": "src, dst, dst_exists",
         },
+        "large_root_guidance": (
+            "For large or vendored-heavy roots, start with map()'s top-level view "
+            "or folders.parent SQL, then scope file queries by folder. Hide generated "
+            "or cache trees with `.quackignore`; record dependency/cache dirs you want "
+            "acknowledged but not indexed in `.quack/config.yaml` index.opaque_dirs; "
+            "or run quack per project with a narrower root."
+        ),
         "annotation_workflow": (
             "Already know this repo? Call describe(path, description, tags) for each "
             "relevant file, then call reindex() once. No per-file model call needed — "
