@@ -387,6 +387,7 @@ def test_write_config_preserves_existing_defaults(tmp_path):
     data = yaml.safe_load(config.read_text())
     assert data["ai"] == {"command": "new", "timeout": 9, "skip": True}
     assert data["embed"] == {
+        "provider": "builtin",
         "command": "embed",
         "dim": 3,
         "timeout": 4,
@@ -395,12 +396,17 @@ def test_write_config_preserves_existing_defaults(tmp_path):
         "text_char_limit": 20000,
         "bodyless_tags": [],
         "bodyless_extensions": [],
+        "nonembeddable_tags": [],
+        "nonembeddable_extensions": [],
+        "nonembeddable_dirs": [],
     }
     assert data["defaults"] == {
         "search_limit": 4,
         "sql_row_limit": 5,
         "central_limit": 6,
         "map_auto_items": 50,
+        "hidden_dir_penalty": 1.0,
+        "local_dir_boost": 1.5,
         "rrf_k": 60,
         "weight_name": 10,
         "weight_tag": 6,

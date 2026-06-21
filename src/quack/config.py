@@ -63,14 +63,56 @@ DEFAULT_DATASET_EXTENSIONS: frozenset[str] = frozenset({
     "wav", "flac", "mp3", "ogg", "mp4", "mov", "avi", "mkv",
     "ply", "pcd",
 })
+# "Bodyless" files DO get an embedding vector, but built from metadata only
+# (path/name/type/tags/description/links) — their raw bytes are skipped because
+# they are bulky or not prose. This is for text-ish-but-unhelpful-body formats;
+# genuinely binary/non-text formats are handled one tier up by
+# DEFAULT_NONEMBEDDABLE_* (no vector at all), so they are deliberately NOT
+# repeated here.
 DEFAULT_BODYLESS_EMBED_TAGS: frozenset[str] = frozenset({
-    "assets", "data", "dependencies", "lockfile",
+    "data",
 })
 DEFAULT_BODYLESS_EMBED_EXTENSIONS: frozenset[str] = frozenset({
-    "ai", "avif", "bmp", "csv", "db", "duckdb", "gif", "gz", "ico",
-    "jpeg", "jpg", "jsonl", "log", "mp3", "mp4", "parquet", "pdf",
-    "png", "sqlite", "sqlite3", "svg", "tar", "tsv", "webp",
-    "woff", "woff2", "xls", "xlsx", "zip",
+    "csv", "jsonl", "log", "pdf", "svg", "tsv", "xls", "xlsx",
+})
+# Stricter than "bodyless": files whose extension is here get NO embedding
+# vector at all (not even a metadata-only one). These are genuinely non-text /
+# binary formats — or content-free sidecars — so the only signal they could
+# contribute is their path, which the structural and full-text tiers already
+# cover. Skipping them outright is the difference between embedding a few
+# thousand meaningful files and embedding hundreds of thousands of asset blobs.
+# A file with an authored/generated description is embedded regardless (the
+# description is real signal); see catalog.embeddable.
+DEFAULT_NONEMBEDDABLE_EXTENSIONS: frozenset[str] = frozenset({
+    # images
+    "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp", "ico", "avif", "ai",
+    # audio / video
+    "mp3", "wav", "flac", "ogg", "aac", "m4a", "mp4", "mov", "avi", "mkv", "webm",
+    # archives
+    "zip", "tar", "gz", "bz2", "xz", "7z", "rar",
+    # fonts
+    "woff", "woff2", "ttf", "otf", "eot",
+    # databases
+    "db", "duckdb", "sqlite", "sqlite3",
+    # compiled / binary artifacts
+    "bin", "exe", "dll", "so", "dylib", "o", "a", "class", "wasm", "pyc", "pyd",
+    # ML tensors / serialized binary data
+    "npy", "npz", "pt", "pth", "ckpt", "safetensors", "onnx", "pb",
+    "h5", "hdf5", "tfrecord", "mat", "pkl", "pickle", "parquet", "arrow", "feather",
+    # Unity GUID sidecars: text, but pure per-asset import-settings noise.
+    "meta",
+})
+DEFAULT_NONEMBEDDABLE_TAGS: frozenset[str] = frozenset({
+    "assets", "dependencies", "lockfile",
+})
+# Folders that are walked and indexed — so their files stay findable by name and
+# full-text search — but whose files are never embedded. These are large,
+# regenerated trees (e.g. a Unity project's import cache) where per-file semantic
+# vectors add no value and would dominate the embed run. Matched on any ancestor
+# directory name. Contrast with core.DEFAULT_OPAQUE_DIRS, which are not even
+# descended into. A described file under one of these is still embedded.
+DEFAULT_NONEMBEDDABLE_DIRS: frozenset[str] = frozenset({
+    "Library", "Temp", "Logs", "MemoryCaptures", "UserSettings",
 })
 
 # Default prompt template for `quack generate`. Use {path}, {ext}, {content} as
@@ -149,6 +191,9 @@ class EmbedConfig:
     text_char_limit: int = DEFAULT_EMBED_TEXT_CHAR_LIMIT
     bodyless_tags: list[str] = field(default_factory=list)
     bodyless_extensions: list[str] = field(default_factory=list)
+    nonembeddable_tags: list[str] = field(default_factory=list)
+    nonembeddable_extensions: list[str] = field(default_factory=list)
+    nonembeddable_dirs: list[str] = field(default_factory=list)
 
     @property
     def configured(self) -> bool:
@@ -235,6 +280,9 @@ class Config:
             text_char_limit=_int_config(emb_raw.get("text_char_limit"), DEFAULT_EMBED_TEXT_CHAR_LIMIT),
             bodyless_tags=_name_list_config(emb_raw.get("bodyless_tags")),
             bodyless_extensions=_str_list_config(emb_raw.get("bodyless_extensions")),
+            nonembeddable_tags=_name_list_config(emb_raw.get("nonembeddable_tags")),
+            nonembeddable_extensions=_str_list_config(emb_raw.get("nonembeddable_extensions")),
+            nonembeddable_dirs=_name_list_config(emb_raw.get("nonembeddable_dirs")),
         )
         defaults_raw = data.get("defaults", {}) or {}
         defaults = DefaultsConfig(
@@ -295,35 +343,206 @@ class Config:
         )
 
 
-def _default_defaults_config() -> dict:
-    return {
-        "search_limit": DEFAULT_SEARCH_LIMIT,
-        "sql_row_limit": DEFAULT_SQL_ROW_LIMIT,
-        "central_limit": DEFAULT_CENTRAL_LIMIT,
-        "map_auto_items": DEFAULT_MAP_AUTO_ITEMS,
-        "rrf_k": DEFAULT_RRF_K,
-        "weight_name": DEFAULT_WEIGHT_NAME,
-        "weight_tag": DEFAULT_WEIGHT_TAG,
-        "weight_description": DEFAULT_WEIGHT_DESCRIPTION,
-    }
+# --- One source of truth for config.yaml -----------------------------------
+#
+# Each section is an ordered list of knobs (and commented-out hints). This spec
+# drives BOTH the generated config.yaml template (with comments) AND the
+# default-/shape-ensuring on load, so the create path and the update path can
+# never drift — the duplication that previously let keys go missing from one
+# place but not another. Typed access still flows through the dataclasses and
+# `Config.load`; this only governs defaults and how the file is written.
 
 
-def _ensure_defaults_shape(d: dict) -> None:
-    d.setdefault("map_auto_items", DEFAULT_MAP_AUTO_ITEMS)
-    d.setdefault("rrf_k", DEFAULT_RRF_K)
-    d.setdefault("weight_name", DEFAULT_WEIGHT_NAME)
-    d.setdefault("weight_tag", DEFAULT_WEIGHT_TAG)
-    d.setdefault("weight_description", DEFAULT_WEIGHT_DESCRIPTION)
+@dataclass(frozen=True)
+class _Knob:
+    """One config key: its default value, an optional inline comment, and
+    optional comment lines emitted just above it. `quote` forces YAML quoting
+    for values that may contain `:`/quotes/braces (the AI command)."""
+
+    key: str
+    default: object
+    comment: str = ""
+    pre: tuple[str, ...] = ()
+    quote: bool = False
 
 
-def _default_embed_config() -> dict:
-    return {
-        "provider": "builtin",
-        "command": "quack embed text",
-        "dim": 256,
-        "timeout": DEFAULT_AI_TIMEOUT,
-        "include_body": True,
-    }
+@dataclass(frozen=True)
+class _Hint:
+    """Commented-out lines emitted verbatim (an optional/advanced key shown only
+    as an example). Contributes nothing to the default shape."""
+
+    lines: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _Section:
+    name: str
+    header: tuple[str, ...]
+    items: tuple
+
+
+_CONFIG_SPEC: tuple[_Section, ...] = (
+    _Section("ai", (), (
+        _Knob("command", "", quote=True, pre=(
+            "Command that turns a prompt into text. {prompt} is substituted with",
+            "the generation prompt; if you omit {prompt}, the prompt is piped on",
+            "stdin. Swap this line to use a different assistant.",
+        )),
+        _Knob("timeout", DEFAULT_AI_TIMEOUT),
+        _Knob("skip", False, pre=(
+            "Set skip: true to use Space without AI; descriptions stay manual and",
+            "`quack generate` will not offer to set up an assistant.",
+        )),
+        _Hint((
+            "Customize the prompt `quack generate` sends to the AI. Use {path},",
+            "{ext}, and {content} as placeholders; all other { } are literal.",
+            "Omit this key to use the built-in default prompt.",
+            "generate_prompt: |",
+            "  Classify the following file ...",
+        )),
+    )),
+    _Section("defaults", (
+        "Agent-facing output defaults. Tool-call arguments and MCP serve flags",
+        "can override these, but these are the persistent workspace defaults.",
+    ), (
+        _Knob("search_limit", DEFAULT_SEARCH_LIMIT),
+        _Knob("sql_row_limit", DEFAULT_SQL_ROW_LIMIT),
+        _Knob("central_limit", DEFAULT_CENTRAL_LIMIT),
+        _Knob("map_auto_items", DEFAULT_MAP_AUTO_ITEMS,
+              "`quack map` auto-depth target: expand until ~this many entries"),
+        _Knob("hidden_dir_penalty", DEFAULT_HIDDEN_DIR_PENALTY,
+              "search rank penalty for hits under hidden/.dot dirs"),
+        _Knob("local_dir_boost", DEFAULT_LOCAL_DIR_BOOST,
+              "search rank boost for hits under the current working dir"),
+        _Knob("rrf_k", DEFAULT_RRF_K,
+              "reciprocal rank fusion constant (higher = flatter score spread)"),
+        _Knob("weight_name", DEFAULT_WEIGHT_NAME, "structural tier: name match score"),
+        _Knob("weight_tag", DEFAULT_WEIGHT_TAG, "structural tier: tag match score"),
+        _Knob("weight_description", DEFAULT_WEIGHT_DESCRIPTION,
+              "structural tier: description match score"),
+    )),
+    _Section("index", (), (
+        _Knob("store_body", DEFAULT_STORE_BODY, pre=(
+            "Store file text in DuckDB for body full-text search. Set false to",
+            "keep only path/metadata/links in the catalog; run `quack reindex`",
+            "after changing this so old catalog rows are rebuilt.",
+        )),
+        _Knob("diagrams", DEFAULT_DIAGRAMS, pre=(
+            "Generate Mermaid link diagrams during `quack reindex` when folder",
+            "indexes changed. Use `quack reindex --no-diagrams` to skip once.",
+        )),
+        _Knob("dataset_threshold", DEFAULT_DATASET_THRESHOLD),
+        _Knob("dataset_ext_threshold", DEFAULT_DATASET_EXT_THRESHOLD),
+        _Knob("dataset_extensions", [],
+              "extra extensions that count toward dataset_ext_threshold"),
+        _Knob("body_max_bytes", DEFAULT_BODY_MAX_BYTES,
+              "max bytes read from each file for FTS body"),
+        _Knob("tag_rollup_limit", DEFAULT_TAG_ROLLUP_LIMIT,
+              "top N tags surfaced in folder rollups"),
+        _Knob("opaque_dirs", [],
+              "additional dir names to record but not descend (e.g. build outputs)"),
+        _Knob("diagram_max_depth", DEFAULT_DIAGRAM_MAX_DEPTH,
+              "global link diagram includes folders up to this depth"),
+    )),
+    _Section("embed", (
+        "Free local default. Run `quack embed init` to choose Ollama or",
+        "another provider, or edit this command directly. The command must",
+        "print one JSON array of floats; if {text} is omitted, text is piped",
+        "on stdin.",
+    ), (
+        _Knob("provider", "builtin"),
+        _Knob("command", "quack embed text"),
+        _Knob("dim", 256),
+        _Knob("timeout", DEFAULT_AI_TIMEOUT),
+        _Knob("include_body", True, pre=(
+            "Set false to embed only path/name/type/tags/description/links,",
+            "without raw file body content.",
+        )),
+        _Knob("body_char_limit", DEFAULT_EMBED_BODY_CHAR_LIMIT,
+              "max body chars in per-file embed text"),
+        _Knob("text_char_limit", DEFAULT_EMBED_TEXT_CHAR_LIMIT,
+              "max total chars sent to the embedding model"),
+        _Knob("bodyless_tags", [],
+              "additional tags whose files embed metadata only (no body)"),
+        _Knob("bodyless_extensions", [],
+              "additional extensions that embed metadata only (no body)"),
+        _Knob("nonembeddable_tags", [],
+              "additional tags whose files skip embedding entirely", pre=(
+            "Stricter than bodyless: files matching these get NO embedding vector",
+            "at all (built-in defaults already cover images, audio/video, archives,",
+            "fonts, databases, binaries, tensors, and Unity .meta sidecars). A file",
+            "with a description is always embedded. These extend the defaults.",
+        )),
+        _Knob("nonembeddable_extensions", [],
+              "additional extensions that skip embedding entirely"),
+        _Knob("nonembeddable_dirs", [],
+              "folders walked+indexed but never embedded (e.g. Unity Library)"),
+    )),
+    _Section("lake", (
+        "DuckLake Parquet-backed catalog snapshots and auto-tiering.",
+        "When enabled, each reindex snapshots files+folders to .quack/lake_data/.",
+    ), (
+        _Knob("enabled", DEFAULT_LAKE_ENABLED),
+        _Knob("snapshot_on_reindex", DEFAULT_LAKE_SNAPSHOT),
+        _Knob("size_threshold_mb", DEFAULT_LAKE_SIZE_THRESHOLD_MB, pre=(
+            "Tier body text to DuckLake when quack.duckdb exceeds this size (MB).",
+        )),
+        _Knob("row_threshold", DEFAULT_LAKE_ROW_THRESHOLD, pre=(
+            "Or when the files table exceeds this many rows.",
+        )),
+    )),
+)
+
+
+def _yaml_value(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, list):
+        return "[]"
+    return str(v)
+
+
+def _canonical_defaults() -> dict:
+    """The default value of every config key, by section, derived from the spec.
+    Hints contribute nothing. The single source the shape-ensuring uses."""
+    out: dict[str, dict] = {}
+    for sec in _CONFIG_SPEC:
+        section: dict[str, object] = {}
+        for item in sec.items:
+            if isinstance(item, _Knob):
+                section[item.key] = list(item.default) if isinstance(item.default, list) else item.default
+        out[sec.name] = section
+    return out
+
+
+def _render_config_yaml(overrides: dict) -> str:
+    """Render the full commented config.yaml from the spec. `overrides` supplies
+    runtime values (the chosen AI command/timeout/skip) keyed by (section, key)."""
+    parts: list[str] = ["# Space configuration.\n\n"]
+    for sec in _CONFIG_SPEC:
+        parts.append(f"{sec.name}:\n")
+        for line in sec.header:
+            parts.append(f"  # {line}\n")
+        for item in sec.items:
+            if isinstance(item, _Hint):
+                for line in item.lines:
+                    parts.append(f"  # {line}\n")
+                continue
+            for line in item.pre:
+                parts.append(f"  # {line}\n")
+            value = overrides.get((sec.name, item.key), item.default)
+            rendered = _yaml_scalar(value) if item.quote else _yaml_value(value)
+            line = f"  {item.key}: {rendered}"
+            if item.comment:
+                line += f"  # {item.comment}"
+            parts.append(line + "\n")
+        parts.append("\n")
+    parts.append(
+        "# Set gitignore: false to opt out of quack managing a block in your\n"
+        "# repo's .gitignore (and skip .quack/.gitignore creation).\n"
+        "gitignore: true\n"
+    )
+    return "".join(parts)
 
 
 def _load_config_data(path: Path) -> dict:
@@ -337,34 +556,14 @@ def _load_config_data(path: Path) -> dict:
 
 
 def _ensure_config_shape(data: dict) -> dict:
-    data.setdefault("ai", {"command": "", "timeout": DEFAULT_AI_TIMEOUT, "skip": False})
-    data.setdefault("defaults", _default_defaults_config())
-    if not isinstance(data.get("index"), dict):
-        data["index"] = {}
-    data["index"].setdefault("store_body", DEFAULT_STORE_BODY)
-    data["index"].setdefault("diagrams", DEFAULT_DIAGRAMS)
-    data["index"].setdefault("dataset_threshold", DEFAULT_DATASET_THRESHOLD)
-    data["index"].setdefault("dataset_ext_threshold", DEFAULT_DATASET_EXT_THRESHOLD)
-    data["index"].setdefault("dataset_extensions", [])
-    data["index"].setdefault("body_max_bytes", DEFAULT_BODY_MAX_BYTES)
-    data["index"].setdefault("tag_rollup_limit", DEFAULT_TAG_ROLLUP_LIMIT)
-    data["index"].setdefault("opaque_dirs", [])
-    data["index"].setdefault("diagram_max_depth", DEFAULT_DIAGRAM_MAX_DEPTH)
-    data.setdefault("embed", _default_embed_config())
-    if not isinstance(data.get("embed"), dict):
-        data["embed"] = _default_embed_config()
-    data["embed"].setdefault("include_body", True)
-    data["embed"].setdefault("body_char_limit", DEFAULT_EMBED_BODY_CHAR_LIMIT)
-    data["embed"].setdefault("text_char_limit", DEFAULT_EMBED_TEXT_CHAR_LIMIT)
-    data["embed"].setdefault("bodyless_tags", [])
-    data["embed"].setdefault("bodyless_extensions", [])
-    if not isinstance(data.get("lake"), dict):
-        data["lake"] = {}
-    data["lake"].setdefault("enabled", DEFAULT_LAKE_ENABLED)
-    data["lake"].setdefault("snapshot_on_reindex", DEFAULT_LAKE_SNAPSHOT)
-    data["lake"].setdefault("size_threshold_mb", DEFAULT_LAKE_SIZE_THRESHOLD_MB)
-    data["lake"].setdefault("row_threshold", DEFAULT_LAKE_ROW_THRESHOLD)
-    _ensure_defaults_shape(data.setdefault("defaults", _default_defaults_config()))
+    """Fill in any missing default keys without touching values the user set.
+    Driven entirely by `_canonical_defaults()` so it can't drift from the
+    written template."""
+    for section, keys in _canonical_defaults().items():
+        if not isinstance(data.get(section), dict):
+            data[section] = {}
+        for key, default in keys.items():
+            data[section].setdefault(key, list(default) if isinstance(default, list) else default)
     data.setdefault("gitignore", True)
     return data
 
@@ -389,87 +588,20 @@ def write_config(
 
     if path.exists():
         data = _ensure_config_shape(_load_config_data(path))
-        data["ai"] = {"command": command, "timeout": timeout, "skip": skip}
+        # Replace only the AI command/timeout/skip; preserve any other ai keys
+        # the user set (e.g. a custom generate_prompt).
+        ai = data["ai"] if isinstance(data.get("ai"), dict) else {}
+        ai.update({"command": command, "timeout": timeout, "skip": skip})
+        data["ai"] = ai
         _write_config_data(path, data)
         return path
 
-    body = (
-        "# Space configuration.\n\n"
-        "ai:\n"
-        "  # Command that turns a prompt into text. {prompt} is substituted with\n"
-        "  # the generation prompt; if you omit {prompt}, the prompt is piped on\n"
-        "  # stdin. Swap this line to use a different assistant.\n"
-        f"  command: {_yaml_scalar(command)}\n"
-        f"  timeout: {timeout}\n"
-        "  # Set skip: true to use Space without AI; descriptions stay manual and\n"
-        "  # `quack generate` will not offer to set up an assistant.\n"
-        f"  skip: {'true' if skip else 'false'}\n"
-        "  # Customize the prompt `quack generate` sends to the AI. Use {path},\n"
-        "  # {ext}, and {content} as placeholders; all other { } are literal.\n"
-        "  # Omit this key to use the built-in default prompt.\n"
-        "  # generate_prompt: |\n"
-        "  #   Classify the following file ...\n"
-        "\n"
-        "defaults:\n"
-        "  # Agent-facing output defaults. Tool-call arguments and MCP serve flags\n"
-        "  # can override these, but these are the persistent workspace defaults.\n"
-        f"  search_limit: {DEFAULT_SEARCH_LIMIT}\n"
-        f"  sql_row_limit: {DEFAULT_SQL_ROW_LIMIT}\n"
-        f"  central_limit: {DEFAULT_CENTRAL_LIMIT}\n"
-        f"  map_auto_items: {DEFAULT_MAP_AUTO_ITEMS}  # `quack map` auto-depth target: expand until ~this many entries\n"
-        f"  rrf_k: {DEFAULT_RRF_K}  # reciprocal rank fusion constant (higher = flatter score spread)\n"
-        f"  weight_name: {DEFAULT_WEIGHT_NAME}    # structural tier: name match score\n"
-        f"  weight_tag: {DEFAULT_WEIGHT_TAG}     # structural tier: tag match score\n"
-        f"  weight_description: {DEFAULT_WEIGHT_DESCRIPTION}  # structural tier: description match score\n"
-        "\n"
-        "index:\n"
-        "  # Store file text in DuckDB for body full-text search. Set false to\n"
-        "  # keep only path/metadata/links in the catalog; run `quack reindex`\n"
-        "  # after changing this so old catalog rows are rebuilt.\n"
-        f"  store_body: {'true' if DEFAULT_STORE_BODY else 'false'}\n"
-        "  # Generate Mermaid link diagrams during `quack reindex` when folder\n"
-        "  # indexes changed. Use `quack reindex --no-diagrams` to skip once.\n"
-        f"  diagrams: {'true' if DEFAULT_DIAGRAMS else 'false'}\n"
-        f"  dataset_threshold: {DEFAULT_DATASET_THRESHOLD}\n"
-        f"  dataset_ext_threshold: {DEFAULT_DATASET_EXT_THRESHOLD}\n"
-        "  dataset_extensions: []  # extra extensions that count toward dataset_ext_threshold\n"
-        f"  body_max_bytes: {DEFAULT_BODY_MAX_BYTES}  # max bytes read from each file for FTS body\n"
-        f"  tag_rollup_limit: {DEFAULT_TAG_ROLLUP_LIMIT}  # top N tags surfaced in folder rollups\n"
-        "  opaque_dirs: []  # additional dir names to record but not descend (e.g. build outputs)\n"
-        f"  diagram_max_depth: {DEFAULT_DIAGRAM_MAX_DEPTH}  # global link diagram includes folders up to this depth\n"
-        "\n"
-        "embed:\n"
-        "  # Free local default. Run `quack embed init` to choose Ollama or\n"
-        "  # another provider, or edit this command directly. The command must\n"
-        "  # print one JSON array of floats; if {text} is omitted, text is piped\n"
-        "  # on stdin.\n"
-        "  provider: builtin\n"
-        "  command: quack embed text\n"
-        "  dim: 256\n"
-        f"  timeout: {DEFAULT_AI_TIMEOUT}\n"
-        "  # Set false to embed only path/name/type/tags/description/links,\n"
-        "  # without raw file body content.\n"
-        "  include_body: true\n"
-        f"  body_char_limit: {DEFAULT_EMBED_BODY_CHAR_LIMIT}  # max body chars in per-file embed text\n"
-        f"  text_char_limit: {DEFAULT_EMBED_TEXT_CHAR_LIMIT}  # max total chars sent to the embedding model\n"
-        "  bodyless_tags: []        # additional tags whose files skip body embedding\n"
-        "  bodyless_extensions: []  # additional extensions that skip body embedding\n"
-        "\n"
-        "lake:\n"
-        "  # DuckLake Parquet-backed catalog snapshots and auto-tiering.\n"
-        "  # When enabled, each reindex snapshots files+folders to .quack/lake_data/.\n"
-        f"  enabled: {'true' if DEFAULT_LAKE_ENABLED else 'false'}\n"
-        f"  snapshot_on_reindex: {'true' if DEFAULT_LAKE_SNAPSHOT else 'false'}\n"
-        "  # Tier body text to DuckLake when quack.duckdb exceeds this size (MB).\n"
-        f"  size_threshold_mb: {DEFAULT_LAKE_SIZE_THRESHOLD_MB}\n"
-        "  # Or when the files table exceeds this many rows.\n"
-        f"  row_threshold: {DEFAULT_LAKE_ROW_THRESHOLD}\n"
-        "\n"
-        "# Set gitignore: false to opt out of quack managing a block in your\n"
-        "# repo's .gitignore (and skip .quack/.gitignore creation).\n"
-        "gitignore: true\n"
-    )
-    path.write_text(body)
+    overrides = {
+        ("ai", "command"): command,
+        ("ai", "timeout"): timeout,
+        ("ai", "skip"): skip,
+    }
+    path.write_text(_render_config_yaml(overrides))
     return path
 
 
@@ -496,6 +628,9 @@ def write_embed_config(
         "text_char_limit": _int_config(old_embed.get("text_char_limit"), DEFAULT_EMBED_TEXT_CHAR_LIMIT),
         "bodyless_tags": _name_list_config(old_embed.get("bodyless_tags")),
         "bodyless_extensions": _str_list_config(old_embed.get("bodyless_extensions")),
+        "nonembeddable_tags": _name_list_config(old_embed.get("nonembeddable_tags")),
+        "nonembeddable_extensions": _str_list_config(old_embed.get("nonembeddable_extensions")),
+        "nonembeddable_dirs": _name_list_config(old_embed.get("nonembeddable_dirs")),
         "skip": skip,
     }
     _write_config_data(path, data)

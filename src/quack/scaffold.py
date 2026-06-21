@@ -103,10 +103,16 @@ ROOT_QUACKIGNORE = """# Gitignore-style rules, one per line. Quack evaluates the
 #   !pattern      — exception: re-include something previously excluded
 #
 # Handled automatically (no need to list):
-#   hidden entirely  — .quack, .git, .obsidian, .trash, and caches
+#   hidden entirely  — .quack, .trash, and caches
 #                      (__pycache__, .mypy_cache, .pytest_cache, .ruff_cache, .cache)
-#   mentioned, not indexed — vendored/dependency trees (site-packages,
+#   mentioned, not descended — vendored/dependency trees (site-packages,
 #                      node_modules, .venv, venv, .tox, .eggs, bower_components)
+#                      and VCS/tool metadata (.git, .obsidian, .idea): the folder
+#                      is acknowledged but its files are not indexed
+#   indexed, not embedded — large regenerated trees like Unity's Library, Temp,
+#                      Logs, MemoryCaptures, UserSettings: their files stay
+#                      searchable by name/FTS but get no semantic vectors
+#                      (embed.nonembeddable_dirs in config.yaml)
 #   datasets — a folder with more files than index.dataset_threshold (any type),
 #                      or more than index.dataset_ext_threshold files of one bulk
 #                      type (.npy, .png, tensors…), is recorded and marked a
