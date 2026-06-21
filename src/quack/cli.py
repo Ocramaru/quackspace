@@ -336,7 +336,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_root_arg(p_search)
     p_search.add_argument("query", nargs="+", help="search terms")
-    p_search.add_argument("-n", "--limit", type=int, default=10, help="max results")
+    p_search.add_argument(
+        "-n", "--limit", type=int, default=5,
+        help="max results (default: 5; the output tells you how to ask for more)",
+    )
     p_search.add_argument(
         "--no-expand", action="store_true", help="skip graph-neighbour expansion"
     )
@@ -348,6 +351,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_search.add_argument(
         "--folders", action="store_true", help="force only folder-level search"
+    )
+    p_search.add_argument(
+        "--with-folders", action="store_true",
+        help="also show matching folders alongside file hits (hidden by default)",
     )
     p_search.add_argument(
         "--no-local", action="store_true",
@@ -1102,16 +1109,20 @@ def _dispatch(argv: list[str] | None) -> int:
         from .search import format_folder_hits, route, search_folders
 
         with paddling("Searching") as progress:
+            # Fetch one extra hit so we can tell the user whether more exist
+            # without paging through them; only `limit` are ever shown.
             hits = search(
                 terms,
                 explicit_root=args.root,
-                limit=args.limit,
+                limit=args.limit + 1,
                 expand=not args.no_expand,
                 cwd_rel=cwd_rel,
                 progress=progress.update,
             )
+            # Folders are noise in a file search, so they stay hidden unless the
+            # caller asks for them with --with-folders.
             fhits: list = []
-            if route(terms) in ("folders", "both"):
+            if args.with_folders and route(terms) in ("folders", "both"):
                 fhits = search_folders(
                     terms,
                     explicit_root=args.root,
@@ -1119,9 +1130,19 @@ def _dispatch(argv: list[str] | None) -> int:
                     cwd_rel=cwd_rel,
                     progress=progress.update,
                 )
+        has_more = len(hits) > args.limit
+        hits = hits[: args.limit]
         if cwd_rel:
             print(f"# cwd: {cwd_rel}/  (local results boosted)")
         print(format_hits(hits, root=root))
+        if has_more:
+            more = max(args.limit * 2, 30)
+            print(
+                f"\n# showing the top {len(hits)} — for more results run: "
+                f"quack search {terms} --limit {more}"
+            )
+        if not args.with_folders and route(terms) in ("folders", "both"):
+            print("# folders are hidden — add --with-folders to include them")
         if fhits:
             print("\n# folders")
             print(format_folder_hits(fhits))

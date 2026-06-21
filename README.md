@@ -70,7 +70,9 @@ quack init --no-gitignore   # scaffold without writing quack-managed .gitignore 
 quack init --no-diagrams    # scaffold with diagram generation turned off in config
 quack init --dry-run        # show what init would write without changing files
 quack reindex               # rebuild everything (catalog, map, diagrams)
-quack search "terms"        # auto-hybrid: keyword + FTS + semantic + graph
+quack search "terms"        # auto-hybrid: keyword + FTS + semantic + graph (top 5)
+quack search "terms" --limit 30      # ask for more than the default 5 results
+quack search "terms" --with-folders  # also match folders (hidden by default)
 quack search "terms" --fts  # force BM25 full-text ranking
 quack sql "SELECT ..."      # query the catalog directly
 quack graph path a b        # shortest link path between two files
