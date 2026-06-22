@@ -6,6 +6,10 @@ quickly. Plays well with Obsidian but does not require it.
 
     quack init [dir]         create & scaffold a new space
     quack reindex            regenerate .index.yaml / map.yaml / catalog / diagrams
+    quack status             show pending index and embedding work
+    quack sync               incrementally refresh the index and embeddings
+    quack upgrade            check for and install a newer quackspace release
+    quack uninstall          remove workspace integration and the package
     quack describe PATH -d "…" [-t tag,tag]   record a file's description + tags
     quack generate [--stale] AI: fill in (or refresh) descriptions + tags
     quack doctor             report broken links + missing/stale descriptions
@@ -22,17 +26,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from . import __version__
 from .catalog import DB_NAME
 from .config import Config
 from .embed import EMBED_PROVIDER_CHOICES
-from .prompts import yes_no
+from .prompts import yes_no, is_interactive
 
 try:
     from rich_argparse import RichHelpFormatter
@@ -189,6 +196,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_reindex.add_argument(
         "--no-diagrams", action="store_true", help="skip Mermaid diagram generation"
     )
+
+    p_status = sub.add_parser("status", help="show pending index and embedding work")
+    _add_root_arg(p_status)
+
+    p_sync = sub.add_parser("sync", help="incrementally refresh the index and embeddings")
+    _add_root_arg(p_sync)
+
+    p_upgrade = sub.add_parser(
+        "upgrade", aliases=["update"], help="check for and install a newer quackspace release"
+    )
+    _add_root_arg(p_upgrade)
+
+    p_uninstall = sub.add_parser("uninstall", help="remove quack integration and the package")
+    _add_root_arg(p_uninstall)
 
     p_diagram = sub.add_parser("diagram", help="regenerate Mermaid link diagrams only")
     _add_root_arg(p_diagram)
@@ -896,6 +917,206 @@ def _run_map(args) -> int:
     return 0
 
 
+def _print_pending_examples(label: str, paths: set[str], limit: int = 5) -> None:
+    if not paths:
+        return
+    for rel in sorted(paths)[:limit]:
+        print(f"    {label}: {rel}")
+    if len(paths) > limit:
+        print(f"    … and {len(paths) - limit:,} more")
+
+
+def _run_status(args) -> int:
+    from .sync import pending_work
+
+    pending = pending_work(args.root)
+    if not pending.catalog_exists:
+        print("No catalog found. Run `quack init` or `quack reindex`.")
+        return 0
+    if pending.nothing_to_do:
+        print("✓ up to date")
+        return 0
+    print("Space is out of date:")
+    print(f"  new:                {len(pending.new):,}")
+    print(f"  modified:           {len(pending.modified):,}")
+    print(f"  deleted:            {len(pending.deleted):,}")
+    print(f"  missing embeddings: {len(pending.missing_embeddings):,}")
+    _print_pending_examples("new", pending.new)
+    _print_pending_examples("modified", pending.modified)
+    _print_pending_examples("deleted", pending.deleted)
+    _print_pending_examples("embed", pending.missing_embeddings)
+    print("  run `quack sync` to update")
+    return 0
+
+
+def _run_sync(args) -> int:
+    from .embed import EmbedNotConfigured, build_embeddings
+    from .sync import pending_work
+
+    pending = pending_work(args.root)
+    if not pending.catalog_exists:
+        print("No catalog found. Run `quack init` or `quack reindex`.")
+        return 1
+    config = Config.load(args.root)
+    embeddings_enabled = config.embed.configured and not config.embed.skip
+    if pending.nothing_to_do or (
+        not pending.index_count and not embeddings_enabled
+    ):
+        print("✓ already up to date")
+        if pending.missing_embeddings and not embeddings_enabled:
+            print("  embeddings: skipped (no embed command configured)")
+        return 0
+
+    reindex(args.root)
+    if pending.index_count:
+        print(f"✓ reindexed {pending.index_count:,} changed file(s)")
+    else:
+        print("  index: already up to date")
+    if not embeddings_enabled:
+        print("  embeddings: skipped (no embed command configured)")
+        return 0
+    try:
+        embedded = build_embeddings(args.root)
+    except EmbedNotConfigured:
+        print("  embeddings: skipped (no embed command configured)")
+        return 0
+    refreshed = embedded.get("updated", embedded.get("embedded", 0))
+    pruned = embedded.get("deleted", 0)
+    print(f"✓ refreshed {refreshed:,} embedding(s); pruned {pruned:,}")
+    return 0
+
+
+def _uses_uv_tool() -> bool:
+    uv = shutil.which("uv")
+    if not uv:
+        return False
+    try:
+        result = subprocess.run(
+            [uv, "tool", "list"], capture_output=True, text=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and "quackspace" in result.stdout.lower()
+
+
+def _package_command(action: str) -> list[str]:
+    if _uses_uv_tool():
+        return ["uv", "tool", "upgrade" if action == "upgrade" else "uninstall", "quackspace"]
+    if action == "upgrade":
+        return ["python", "-m", "pip", "install", "--upgrade", "quackspace"]
+    return ["python", "-m", "pip", "uninstall", "-y", "quackspace"]
+
+
+def _safe_confirm(prompt: str, *, default: bool = False) -> bool:
+    if not is_interactive():
+        print(f"  non-interactive shell: defaulting to {'yes' if default else 'no'}")
+        return default
+    return yes_no(prompt, default=default)
+
+
+def _version_key(value: str):
+    try:
+        from packaging.version import parse
+
+        return parse(value)
+    except ImportError:
+        import re
+
+        return tuple(int(piece) for piece in re.findall(r"\d+", value))
+
+
+def _run_upgrade(args) -> int:
+    try:
+        with urllib.request.urlopen(
+            "https://pypi.org/pypi/quackspace/json", timeout=10
+        ) as response:
+            latest = json.loads(response.read().decode("utf-8"))["info"]["version"]
+    except (OSError, urllib.error.URLError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        print(f"✗ could not check PyPI: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"current: {__version__}")
+    print(f"latest:  {latest}")
+    if _version_key(latest) <= _version_key(__version__):
+        print("✓ already current")
+        return 0
+    command = _package_command("upgrade")
+    printable = " ".join(command)
+    print(f"upgrade: {printable}")
+    if not _safe_confirm("Run the upgrade now?", default=False):
+        print("  skipped")
+        return 0
+    try:
+        result = subprocess.run(command, check=False)
+    except OSError as exc:
+        print(f"✗ could not run upgrade: {exc}", file=sys.stderr)
+        return 1
+    if result.returncode:
+        print(f"✗ upgrade failed (exit {result.returncode})", file=sys.stderr)
+        return result.returncode
+    print("✓ upgraded quackspace")
+    return 0
+
+
+def _unregister_mcp_clients() -> None:
+    from . import mcp_install
+
+    for client in mcp_install.CLIENTS:
+        if not client.installed:
+            continue
+        if client.key == "claude":
+            command = [client.binary, "mcp", "remove", mcp_install.SERVER_NAME]
+        elif client.key == "kiro":
+            command = [client.binary, "mcp", "remove", "--name", mcp_install.SERVER_NAME]
+        else:
+            continue
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+            if result.returncode == 0:
+                print(f"  ✓ removed MCP registration from {client.label}")
+            else:
+                print(f"  note: could not remove MCP registration from {client.label}")
+        except (OSError, subprocess.TimeoutExpired):
+            print(f"  note: could not remove MCP registration from {client.label}")
+
+
+def _run_uninstall(args) -> int:
+    from .clean import clean
+
+    root = find_root(args.root)
+    if _safe_confirm(
+        "Also remove quack's files from this space (descriptions, catalog, QUACK.md)?",
+        default=False,
+    ):
+        removed = clean(str(root), purge=True)
+        total = sum(value for value in removed.values() if isinstance(value, int))
+        print(f"✓ removed {total:,} quack workspace artifact(s)")
+    else:
+        print("  workspace files: kept")
+
+    project_mcp = root / ".mcp.json"
+    if project_mcp.exists():
+        project_mcp.unlink()
+        print(f"  ✓ removed {project_mcp}")
+    _unregister_mcp_clients()
+
+    command = _package_command("uninstall")
+    printable = " ".join(command)
+    print(f"uninstall package: {printable}")
+    if not _safe_confirm("Run the package uninstall now?", default=False):
+        print("  package uninstall skipped")
+        return 0
+    try:
+        result = subprocess.run(command, check=False)
+    except OSError as exc:
+        print(f"✗ could not run package uninstall: {exc}", file=sys.stderr)
+        return 1
+    if result.returncode:
+        print(f"✗ package uninstall failed (exit {result.returncode})", file=sys.stderr)
+        return result.returncode
+    return 0
+
+
 def _dispatch(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -943,6 +1164,18 @@ def _dispatch(argv: list[str] | None) -> int:
         else:
             print("  diagrams: skipped (index.diagrams: false)")
         return 0
+
+    if args.command == "status":
+        return _run_status(args)
+
+    if args.command == "sync":
+        return _run_sync(args)
+
+    if args.command in ("upgrade", "update"):
+        return _run_upgrade(args)
+
+    if args.command == "uninstall":
+        return _run_uninstall(args)
 
     if args.command == "diagram":
         from ._duck import swimming
