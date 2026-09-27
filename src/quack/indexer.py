@@ -102,8 +102,14 @@ def write_folder_indexes(
             # when it did, so it can't list now-deleted children forever.
             stale = index_store.index_path(folder)
             if stale.exists():
-                stale.unlink()
-                written.append(stale)
+                try:
+                    stale.unlink()
+                except OSError:
+                    index_store.logger.warning(
+                        "Permission denied removing stale index file: %s", stale
+                    )
+                else:
+                    written.append(stale)
             if progress is not None and (i == total or i % 50 == 0):
                 progress(i, total, f"Writing {rel or '.'}")
             continue
