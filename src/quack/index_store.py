@@ -39,6 +39,7 @@ One ``.index.yaml`` per directory, so each child's metadata lives next to it.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import yaml
@@ -48,6 +49,8 @@ import yaml
 # back to the pure-Python versions otherwise.
 _DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
 _LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+logger = logging.getLogger(__name__)
 
 
 def fast_dump(data) -> str:
@@ -90,7 +93,7 @@ def _read_doc(path: Path) -> dict:
         return {}
     try:
         data = fast_load(path.read_text()) or {}
-    except yaml.YAMLError:
+    except (yaml.YAMLError, OSError):
         return {}
     return data if isinstance(data, dict) else {}
 
@@ -176,27 +179,46 @@ def _dir_body(dirs: list[dict]) -> dict:
 
 def write_index(
     folder: Path, entries: list[dict], dirs: list[dict] | None = None
-) -> Path:
+) -> Path | None:
     """Write ``<folder>/.index.yaml`` from ordered child entries.
 
     ``entries`` carry ``name, description, tags, links, file_modified,
     described_at``; ``dirs`` (immediate subfolders) carry ``name, description,
     tags, n_files, diagram, types, described_at``. The ``directories:`` section
-    is written first (and only when there are subfolders)."""
+    is written first (and only when there are subfolders).
+
+    Returns ``None`` (instead of raising) when the folder isn't writable —
+    e.g. created by a container or another user — so one unwritable folder
+    doesn't abort the rest of a reindex."""
     path = index_path(folder)
-    path.write_text(render_index(entries, dirs))
+    try:
+        path.write_text(render_index(entries, dirs))
+    except OSError:
+        logger.warning("Permission denied writing index file: %s", path)
+        return None
     return path
 
 
 def write_index_if_changed(
     folder: Path, entries: list[dict], dirs: list[dict] | None = None
 ) -> Path | None:
-    """Write ``<folder>/.index.yaml`` only when the rendered YAML changes."""
+    """Write ``<folder>/.index.yaml`` only when the rendered YAML changes.
+
+    Returns ``None`` (instead of raising) when the folder isn't writable, so
+    one unwritable folder doesn't abort the rest of a reindex."""
     path = index_path(folder)
     text = render_index(entries, dirs)
-    if path.exists() and path.read_text() == text:
+    try:
+        if path.exists() and path.read_text() == text:
+            return None
+    except OSError:
+        logger.warning("Permission denied reading index file: %s", path)
         return None
-    path.write_text(text)
+    try:
+        path.write_text(text)
+    except OSError:
+        logger.warning("Permission denied writing index file: %s", path)
+        return None
     return path
 
 
@@ -238,6 +260,7 @@ def set_meta(
         entry.setdefault("types", {})
     bucket[name] = entry
     doc[section] = bucket
-    path.write_text(
-        HEADER + fast_dump(doc)
-    )
+    try:
+        path.write_text(HEADER + fast_dump(doc))
+    except OSError:
+        logger.warning("Permission denied writing index file: %s", path)

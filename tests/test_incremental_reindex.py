@@ -158,6 +158,43 @@ def test_reindex_detects_file_change_and_updates_catalog(tmp_path):
     assert rows and "revised" in rows[0][0]
 
 
+def test_write_folder_indexes_skips_unwritable_folder(tmp_path):
+    """An unwritable folder must not abort the rest of the reindex."""
+    root = _make_space(tmp_path)
+    proj = root / "projects"
+    space = Space.load(str(root))
+    infos = folders.resolve_folders(space)
+
+    proj.chmod(0o555)
+    try:
+        written = write_folder_indexes(space, infos)
+    finally:
+        proj.chmod(0o755)
+
+    assert (proj / ".index.yaml") not in written
+
+
+def test_write_folder_indexes_skips_unremovable_stale_index(tmp_path):
+    """A stale .index.yaml in a now-childless, unwritable folder must not crash."""
+    root = _make_space(tmp_path)
+    proj = root / "projects"
+    reindex(str(root))
+
+    (proj / "a.md").unlink()
+    (proj / "b.md").unlink()
+    space = Space.load(str(root))
+    infos = folders.resolve_folders(space)
+
+    proj.chmod(0o555)
+    try:
+        written = write_folder_indexes(space, infos)
+    finally:
+        proj.chmod(0o755)
+
+    assert (proj / ".index.yaml").exists()
+    assert (proj / ".index.yaml") not in written
+
+
 def test_reindex_twice_is_consistent(tmp_path):
     """Two successive full reindexes produce the same catalog content."""
     root = _make_space(tmp_path)
