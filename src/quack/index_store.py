@@ -39,18 +39,17 @@ One ``.index.yaml`` per directory, so each child's metadata lives next to it.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import yaml
+
+from . import fsutil
 
 # Prefer libyaml's C dumper/loader when present — ~5x faster YAML, same output,
 # no extra dependency (it ships with PyYAML where libyaml is available). Falls
 # back to the pure-Python versions otherwise.
 _DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
 _LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-
-logger = logging.getLogger(__name__)
 
 
 def fast_dump(data) -> str:
@@ -191,12 +190,7 @@ def write_index(
     e.g. created by a container or another user — so one unwritable folder
     doesn't abort the rest of a reindex."""
     path = index_path(folder)
-    try:
-        path.write_text(render_index(entries, dirs))
-    except OSError:
-        logger.warning("Permission denied writing index file: %s", path)
-        return None
-    return path
+    return path if fsutil.write_generated(path, render_index(entries, dirs)) else None
 
 
 def write_index_if_changed(
@@ -208,18 +202,7 @@ def write_index_if_changed(
     one unwritable folder doesn't abort the rest of a reindex."""
     path = index_path(folder)
     text = render_index(entries, dirs)
-    try:
-        if path.exists() and path.read_text() == text:
-            return None
-    except OSError:
-        logger.warning("Permission denied reading index file: %s", path)
-        return None
-    try:
-        path.write_text(text)
-    except OSError:
-        logger.warning("Permission denied writing index file: %s", path)
-        return None
-    return path
+    return path if fsutil.write_generated(path, text, if_changed=True) else None
 
 
 def render_index(entries: list[dict], dirs: list[dict] | None = None) -> str:
@@ -260,7 +243,4 @@ def set_meta(
         entry.setdefault("types", {})
     bucket[name] = entry
     doc[section] = bucket
-    try:
-        path.write_text(HEADER + fast_dump(doc))
-    except OSError:
-        logger.warning("Permission denied writing index file: %s", path)
+    fsutil.write_generated(path, HEADER + fast_dump(doc))

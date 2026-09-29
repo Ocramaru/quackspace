@@ -18,6 +18,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
+from . import fsutil
 from .core import Space
 
 if TYPE_CHECKING:
@@ -100,8 +101,9 @@ def write_folder_diagrams(
             continue
         folder = space.root / folder_rel
         out = folder / "_diagrams.md"
-        out.write_text(_mermaid_for(entries, all_names, f"{folder_rel} link graph"))
-        written.append(out)
+        text = _mermaid_for(entries, all_names, f"{folder_rel} link graph")
+        if fsutil.write_generated(out, text):
+            written.append(out)
     return written
 
 
@@ -133,11 +135,12 @@ def write_global_diagram(
     out = space.root / ".quack" / "diagram.md"
 
     if not linked:
-        out.write_text(
+        fsutil.write_generated(
+            out,
             GENERATED_HEADER
             + "## Vault link graph\n\n"
             + f"_No linked files found at depth ≤ {max_depth}. "
-            + "Raise `index.diagram_max_depth` in `.quack/config.yaml` to include deeper folders._\n"
+            + "Raise `index.diagram_max_depth` in `.quack/config.yaml` to include deeper folders._\n",
         )
         return out
 
@@ -162,7 +165,7 @@ def write_global_diagram(
     lines.append("    classDef broken fill:#fdd,stroke:#c00,color:#900;")
     lines.append("```")
 
-    out.write_text(GENERATED_HEADER + "## Vault link graph\n\n" + "\n".join(lines) + "\n")
+    fsutil.write_generated(out, GENERATED_HEADER + "## Vault link graph\n\n" + "\n".join(lines) + "\n")
     return out
 
 
@@ -207,6 +210,7 @@ def diagram(
         "folder_diagrams": len(folders),
         "global": str(global_path),
         "global_nodes": global_nodes,
+        "skipped": fsutil.drain_skipped(),
         "total_linked": total_linked,
         "max_depth": max_depth,
     }
