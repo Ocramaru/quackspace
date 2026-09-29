@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import catalog, folders, index_store
+from . import catalog, folders, fsutil, index_store
 from .config import Config, DEFAULT_DATASET_EXTENSIONS
 from .folders import FolderInfo
 from .core import DEFAULT_OPAQUE_DIRS, DatasetPolicy, Space, find_root, scan_signature
@@ -101,15 +101,8 @@ def write_folder_indexes(
             # Folder has nothing to describe. Remove any index left over from
             # when it did, so it can't list now-deleted children forever.
             stale = index_store.index_path(folder)
-            if stale.exists():
-                try:
-                    stale.unlink()
-                except OSError:
-                    index_store.logger.warning(
-                        "Permission denied removing stale index file: %s", stale
-                    )
-                else:
-                    written.append(stale)
+            if stale.exists() and fsutil.remove_generated(stale):
+                written.append(stale)
             if progress is not None and (i == total or i % 50 == 0):
                 progress(i, total, f"Writing {rel or '.'}")
             continue
@@ -154,7 +147,8 @@ def write_map(space: Space, folder_infos: dict[str, FolderInfo]) -> Path:
         space_tags.update(e.tags)
 
     out = space.root / ".quack" / "map.yaml"
-    out.write_text(
+    fsutil.write_generated(
+        out,
         GENERATED_HEADER
         + index_store.fast_dump(
             {
@@ -164,7 +158,7 @@ def write_map(space: Space, folder_infos: dict[str, FolderInfo]) -> Path:
                 "tags": [t for t, _ in space_tags.most_common(10)],
                 "folders": tree,
             }
-        )
+        ),
     )
     return out
 
@@ -373,6 +367,7 @@ def _fast_noop(
         "catalog": "skipped",
         "map": str(root / ".quack" / "map.yaml"),
         "db": str(db),
+        "skipped": [],
     }
 
 
@@ -454,6 +449,7 @@ def reindex(
             "catalog": "skipped",
             "map": str(space.root / ".quack" / "map.yaml"),
             "db": str(catalog.db_path(space)),
+            "skipped": [],
         }
 
     dirty = None if d.full_rebuild else _expand_dirty(d.folders, space.root)
@@ -491,4 +487,5 @@ def reindex(
         "map": str(map_path),
         "db": cat["db"],
         "datasets": dict(space.datasets),
+        "skipped": fsutil.drain_skipped(),
     }

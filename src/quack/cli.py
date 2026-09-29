@@ -75,6 +75,23 @@ def _add_root_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument("--root", default=None, help="quack root (default: walk up for .quack/)")
 
 
+def _add_verbose_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="list every skipped unwritable path",
+    )
+
+
+def _print_skipped(skipped: list[tuple[Path, str]], verbose: bool) -> None:
+    if not skipped:
+        return
+    common = os.path.commonpath([str(Path(p).parent) for p, _ in skipped])
+    print(f"  skipped {len(skipped)} unwritable path(s) under {common}")
+    if verbose:
+        for p, reason in skipped:
+            print(f"    {p} ({reason})")
+
+
 def _add_mcp_limit_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--search-limit", type=int, default=None, help="default MCP search result limit")
     p.add_argument("--sql-row-limit", type=int, default=None, help="default MCP SQL row limit")
@@ -193,6 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_reindex = sub.add_parser("reindex", help="regenerate the AI navigation layer")
     _add_root_arg(p_reindex)
+    _add_verbose_arg(p_reindex)
     p_reindex.add_argument(
         "--no-diagrams", action="store_true", help="skip Mermaid diagram generation"
     )
@@ -213,6 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_diagram = sub.add_parser("diagram", help="regenerate Mermaid link diagrams only")
     _add_root_arg(p_diagram)
+    _add_verbose_arg(p_diagram)
 
     p_map = sub.add_parser("map", help="print the folder tree (folders + files) for a directory")
     _add_root_arg(p_map)
@@ -297,6 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
         "describe", help="record a description + tags for any file"
     )
     _add_root_arg(p_describe)
+    _add_verbose_arg(p_describe)
     p_describe.add_argument("path", help="root-relative path or bare file name")
     p_describe.add_argument("-d", "--description", required=True)
     p_describe.add_argument("-t", "--tags", default="", help="comma-separated")
@@ -314,6 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
         "init", help="create & scaffold a new space, then choose an assistant"
     )
     _add_root_arg(p_init)
+    _add_verbose_arg(p_init)
     p_init.add_argument(
         "dir", nargs="?", default=None, help="target directory (created if missing; default: current)"
     )
@@ -1163,6 +1184,7 @@ def _dispatch(argv: list[str] | None) -> int:
             print("  diagrams: skipped (--no-diagrams)")
         else:
             print("  diagrams: skipped (index.diagrams: false)")
+        _print_skipped(summary.get("skipped", []) + (d.get("skipped", []) if d else []), args.verbose)
         return 0
 
     if args.command == "status":
@@ -1183,6 +1205,7 @@ def _dispatch(argv: list[str] | None) -> int:
         with swimming("Generating diagrams") as progress:
             d = diagram(args.root, progress=progress.update)
         print(f"✓ wrote {d['folder_diagrams']} folder diagram(s)\n  global: {d['global']}")
+        _print_skipped(d.get("skipped", []), args.verbose)
         return 0
 
     if args.command == "clean":
@@ -1265,8 +1288,9 @@ def _dispatch(argv: list[str] | None) -> int:
         print(f"✓ described {rel}")
         if not args.no_reindex:
             with swimming("Reindexing") as progress:
-                reindex(args.root, progress=progress.update)
+                summary = reindex(args.root, progress=progress.update)
             print("  reindexed")
+            _print_skipped(summary.get("skipped", []), args.verbose)
         return 0
 
     if args.command == "where":
@@ -1584,6 +1608,7 @@ def _dispatch(argv: list[str] | None) -> int:
                 print(f"  diagrams: {d['folder_diagrams']:,} folder(s) + {d['global']}")
             elif not diagrams_enabled:
                 print("  diagrams: skipped (index.diagrams: false)")
+            _print_skipped(summary.get("skipped", []) + (d.get("skipped", []) if d else []), args.verbose)
         print("\nChoose an assistant to auto-write descriptions (optional):\n")
         run_setup(str(root))
         if not config_existed:
