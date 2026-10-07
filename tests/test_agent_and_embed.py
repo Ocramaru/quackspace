@@ -761,3 +761,59 @@ def test_embed_cli_rebuild_refreshes_every_current_vector(tmp_path, capsys):
     assert log.read_text().count("\n---\n") == first_calls * 2
     out = capsys.readouterr().out
     assert "refreshed:" in out
+
+
+PHASES_BEFORE_PROVIDER = [
+    "Scanning files",
+    "Loading metadata",
+    "Resolving folders",
+    "Checking existing embeddings",
+    "Planning embedding work",
+]
+
+
+@pytest.mark.parametrize("provider", ["builtin", "ollama"])
+@pytest.mark.parametrize("dim", [2, 0])
+def test_embed_progress_phases_precede_provider_calls(tmp_path, monkeypatch, provider, dim):
+    import yaml
+
+    from quack import embed as embed_mod
+    from quack.indexer import reindex
+
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "a.md").write_text("alpha\n")
+    (root / "b.md").write_text("beta\n")
+    reindex(str(root))
+
+    cfg = root / ".quack" / "config.yaml"
+    data = yaml.safe_load(cfg.read_text())
+    data["embed"] = {"command": "test embedder", "provider": provider, "dim": dim, "timeout": 10}
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    events: list = []
+
+    def fake_embed(_cfg, _text):
+        events.append(("embed",))
+        return [0.1, 0.2]
+
+    monkeypatch.setattr(embed_mod, "_embed_text", fake_embed)
+    monkeypatch.setattr(
+        embed_mod, "_ensure_ollama_server", lambda timeout, **_kwargs: events.append(("server",))
+    )
+    monkeypatch.setattr(embed_mod, "_embedding_worker_limits", lambda _cfg, _workers: (1, 1, None))
+
+    def progress(done, total, message):
+        events.append(("progress", done, total, message))
+
+    summary = build_embeddings(str(root), progress=progress, rebuild=True, workers=1)
+
+    first_provider_call = next(i for i, event in enumerate(events) if event[0] in ("embed", "server"))
+    before = events[:first_provider_call]
+    n_todo = summary["updated"] + summary["folders_updated"] + summary["failed"] + summary["folders_failed"]
+    assert n_todo > 0
+    assert [event[3] for event in before[:5]] == PHASES_BEFORE_PROVIDER
+    assert all(event[1] is None and event[2] is None for event in before[:5])
+    assert before[5:] == [("progress", 0, n_todo + 3, f"Connecting to {provider} embeddings")]
+    assert summary["embedded"] == summary["updated"]
+    assert summary["folders"] == summary["folders_updated"]
+    assert events[first_provider_call] == (("server",) if provider == "ollama" else ("embed",))
