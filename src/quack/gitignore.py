@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 BLOCK_HEADER = "# ignore quackspace files"
+BLOCK_FOOTER = "# end ignore quackspace files"
 
 # File-name patterns quack generates into every folder.
 _TREE_PATTERNS = [".index.yaml", "_diagrams.md"]
@@ -135,8 +136,9 @@ def _normalize_rule(line: str) -> str | None:
         line = line[:-1]
     if not line or line.startswith(("#", "!")):
         return None
-    while line.startswith(("/", "**/")):
-        line = line[1:] if line.startswith("/") else line[3:]
+    # `**/x` is equivalent to `x`; a leading `/` anchors to the root, so it is not.
+    while line.startswith("**/"):
+        line = line[3:]
     return line or None
 
 
@@ -155,6 +157,9 @@ def _find_block(content: str) -> tuple[int, int] | None:
     while pos < len(content):
         line_end = content.find("\n", pos)
         line = content[pos:line_end] if line_end != -1 else content[pos:]
+        if line == BLOCK_FOOTER:
+            pos = line_end + 1 if line_end != -1 else len(content)
+            break
         if not line or line.startswith("#"):
             break
         pos = line_end + 1 if line_end != -1 else len(content)
@@ -179,12 +184,11 @@ def _content_with_block(content: str, patterns: list[str]) -> str:
     # Skip patterns the user's own lines already cover.
     existing = {r for r in map(_normalize_rule, user_content.splitlines()) if r}
     keep = [p for p in patterns if _normalize_rule(p) not in existing]
-    block = "\n" + "\n".join([BLOCK_HEADER, *keep]) + "\n" if keep else ""
+    # Always write the markers, even when every pattern is already covered.
+    block = "\n" + "\n".join([BLOCK_HEADER, *keep, BLOCK_FOOTER]) + "\n"
     if block_range:
         s, e = block_range
         return content[:s] + block + content[e:]
-    if not block:
-        return content
     if content and not content.endswith("\n"):
         content += "\n"
     return content + block
