@@ -323,5 +323,127 @@ def test_opt_out_skips_nested_repos(tmp_path):
     )
     summary = ensure_gitignore(quack_root)
     assert not (alpha / ".gitignore").exists()
+    assert not (quack_root / ".quack" / ".gitignore").exists()
     assert summary.opted_out is True
     assert "gitignore: false" in summary.format(quack_root)
+
+
+# ---------------------------------------------------------------------------
+# Reindex runs the gitignore phase once, off the per-folder write path (MAR-144)
+# ---------------------------------------------------------------------------
+
+def _spy_gitignore_phase(monkeypatch):
+    """Count calls into the gitignore phase and its filesystem helpers."""
+    import threading
+
+    import quack.gitignore as gitignore_module
+    import quack.indexer as indexer_module
+
+    calls = {"enabled": 0, "phase": [], "git_root": 0, "descendants": 0, "apply": 0}
+
+    def counting(name, real):
+        def wrapper(*args, **kwargs):
+            calls[name] += 1
+            return real(*args, **kwargs)
+        return wrapper
+
+    real_phase = indexer_module.ensure_gitignore
+
+    def phase(*args, **kwargs):
+        calls["phase"].append(threading.current_thread().name)
+        return real_phase(*args, **kwargs)
+
+    monkeypatch.setattr(indexer_module, "gitignore_enabled", counting("enabled", indexer_module.gitignore_enabled))
+    monkeypatch.setattr(indexer_module, "ensure_gitignore", phase)
+    monkeypatch.setattr(gitignore_module, "_find_git_root", counting("git_root", gitignore_module._find_git_root))
+    monkeypatch.setattr(
+        gitignore_module, "_find_descendant_git_roots",
+        counting("descendants", gitignore_module._find_descendant_git_roots),
+    )
+    monkeypatch.setattr(gitignore_module, "_apply_block", counting("apply", gitignore_module._apply_block))
+    return calls
+
+
+def _space_in_repo(tmp_path: Path, manage_gitignore: bool) -> tuple[Path, Path, Path]:
+    from quack.scaffold import scaffold_root
+
+    git_root = _make_git_repo(tmp_path / "repo")
+    root = scaffold_root(str(git_root / "space"), manage_gitignore=manage_gitignore)
+    nested = _make_git_repo(root / "projects" / "nested")
+    for folder in ("projects", "projects/nested", "resources"):
+        (root / folder).mkdir(parents=True, exist_ok=True)
+        (root / folder / "note.md").write_text(f"# {folder}\n\nbody\n")
+    return git_root, root, nested
+
+
+def test_reindex_gitignore_false_does_no_gitignore_work(tmp_path, monkeypatch):
+    from quack.indexer import reindex
+
+    git_root, root, nested = _space_in_repo(tmp_path, manage_gitignore=False)
+    calls = _spy_gitignore_phase(monkeypatch)
+
+    summary = reindex(str(root))
+
+    assert summary["catalog"] == "full"
+    assert calls["enabled"] == 1
+    assert len(calls["phase"]) == 1
+    assert calls["git_root"] == calls["descendants"] == calls["apply"] == 0
+    assert not (git_root / ".gitignore").exists()
+    assert not (nested / ".gitignore").exists()
+    assert not (root / ".quack" / ".gitignore").exists()
+
+
+def test_reindex_runs_gitignore_phase_once_off_main_thread(tmp_path, monkeypatch):
+    from quack.indexer import reindex
+
+    git_root, root, nested = _space_in_repo(tmp_path, manage_gitignore=True)
+    calls = _spy_gitignore_phase(monkeypatch)
+
+    summary = reindex(str(root))
+
+    assert summary["folder_indexes"] >= 3  # several folders written, still one phase
+    assert calls["enabled"] == 1
+    assert len(calls["phase"]) == 1
+    assert calls["phase"][0].startswith("quack-gitignore")
+    assert calls["git_root"] == 1
+    assert calls["descendants"] == 1
+    assert BLOCK_HEADER in (git_root / ".gitignore").read_text()
+    assert BLOCK_HEADER in (nested / ".gitignore").read_text()
+
+
+def test_reindex_noop_runs_gitignore_phase_once(tmp_path, monkeypatch):
+    from quack.indexer import reindex
+
+    _, root, _ = _space_in_repo(tmp_path, manage_gitignore=True)
+    reindex(str(root))
+    reindex(str(root))  # settle mtimes of any .gitignore written by the first run
+    calls = _spy_gitignore_phase(monkeypatch)
+
+    summary = reindex(str(root))
+
+    assert summary["catalog"] == "skipped"
+    assert calls["enabled"] == 1
+    assert calls["phase"] == ["MainThread"]
+    assert calls["git_root"] == 1
+
+
+def test_reindex_catalogs_gitignore_after_managed_block_is_written(tmp_path):
+    from quack import catalog
+    from quack.core import Space
+    from quack.indexer import reindex
+    from quack.scaffold import scaffold_root
+
+    root = scaffold_root(str(_make_git_repo(tmp_path / "space")), manage_gitignore=True)
+    gitignore = root / ".gitignore"
+    gitignore.write_text("*.pyc\n")
+
+    summary = reindex(str(root))
+
+    disk_entry = Space.load(str(root)).by_rel[".gitignore"]
+    _, rows = catalog.query(
+        "SELECT body, file_modified, size FROM files WHERE rel = '.gitignore'",
+        explicit_root=str(root),
+    )
+    assert summary["catalog"] == "full"
+    assert BLOCK_HEADER in gitignore.read_text()
+    assert rows == [(disk_entry.body, disk_entry.modified, disk_entry.size)]

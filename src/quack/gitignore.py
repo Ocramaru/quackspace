@@ -9,10 +9,16 @@ refreshes) a clearly delimited block in:
   root).
 
 It never touches the user's own lines.  A `gitignore: false` entry in
-`.quack/config.yaml` opts the workspace out entirely.
+`.quack/config.yaml` opts the workspace out entirely: the whole phase is
+skipped with no filesystem work, `.quack/.gitignore` included.
 
-It also writes `.quack/.gitignore` containing `*` so the whole state
-directory self-ignores, regardless of root configuration.
+Otherwise it also writes `.quack/.gitignore` containing `*` so the whole
+state directory self-ignores, regardless of root configuration.
+
+This is a single whole-space phase: reindex resolves the opt-out once with
+:func:`gitignore_enabled` and calls :func:`ensure_gitignore` exactly once,
+independently of the per-folder writes. Per-folder code must not call into
+this module.
 """
 
 from __future__ import annotations
@@ -50,8 +56,6 @@ class GitignoreSummary:
 
     def format(self, root: Path) -> str:
         if self.opted_out:
-            if self.self_ignore in self.updated:
-                return "gitignore: skipped repo files (gitignore: false); wrote .quack/.gitignore"
             return "gitignore: skipped (gitignore: false)"
         if self.protected_count:
             suffix = f"; scanned {self.scanned_dirs:,} folder(s)"
@@ -174,24 +178,27 @@ def _would_apply_block(gitignore_path: Path, block: str) -> bool:
     return _content_with_block(content, block) != content
 
 
-def _gitignore_opt_out(quack_root: Path) -> bool:
+def gitignore_enabled(quack_root: Path) -> bool:
+    """Resolve the `gitignore:` config key to a boolean (default: enabled)."""
     config_path = quack_root / ".quack" / "config.yaml"
     if not config_path.exists():
-        return False
+        return True
     try:
         import yaml
 
         data = yaml.safe_load(config_path.read_text()) or {}
         if isinstance(data, dict):
-            return not data.get("gitignore", True)
+            return bool(data.get("gitignore", True))
     except Exception:
         pass
-    return False
+    return True
 
 
 def ensure_gitignore(
     quack_root: Path,
     progress: Callable[[int, int, str], None] | None = None,
+    *,
+    enabled: bool | None = None,
 ) -> GitignoreSummary:
     """Idempotently manage the quack block in all relevant git .gitignore files.
 
@@ -200,13 +207,22 @@ def ensure_gitignore(
     - every nested git repo beneath the quack root.
 
     Also ensures `.quack/.gitignore` exists with `*` so the state dir is
-    self-ignoring. No-ops when opted out via config.
+    self-ignoring. *enabled* is the already-resolved opt-out (resolved from
+    config when ``None``); when false this returns before any filesystem work.
     """
     summary = GitignoreSummary()
+    if enabled is None:
+        enabled = gitignore_enabled(quack_root)
+    if not enabled:
+        summary.opted_out = True
+        if progress is not None:
+            progress(1, 1, "Skipped gitignore management")
+        return summary
+
     if progress is not None:
         progress(0, 1, "Preparing gitignore rules")
 
-    # Always keep the state dir self-ignoring.
+    # Keep the state dir self-ignoring.
     quack_dir = quack_root / ".quack"
     quack_dir.mkdir(exist_ok=True)
     self_ignore = quack_dir / ".gitignore"
@@ -214,12 +230,6 @@ def ensure_gitignore(
     if not self_ignore.exists() or self_ignore.read_text().strip() != "*":
         self_ignore.write_text("*\n")
         summary.updated.append(self_ignore)
-
-    if _gitignore_opt_out(quack_root):
-        summary.opted_out = True
-        if progress is not None:
-            progress(1, 1, "Skipped gitignore management")
-        return summary
 
     # Ancestor repo: quack root lives inside a git repo.
     git_root = _find_git_root(quack_root)
@@ -257,14 +267,14 @@ def ensure_gitignore(
 def preview_gitignore(quack_root: Path) -> GitignoreSummary:
     """Return the gitignore summary that would be produced, without writing."""
     summary = GitignoreSummary()
+    if not gitignore_enabled(quack_root):
+        summary.opted_out = True
+        return summary
+
     self_ignore = quack_root / ".quack" / ".gitignore"
     summary.self_ignore = self_ignore
     if not self_ignore.exists() or self_ignore.read_text().strip() != "*":
         summary.updated.append(self_ignore)
-
-    if _gitignore_opt_out(quack_root):
-        summary.opted_out = True
-        return summary
 
     git_root = _find_git_root(quack_root)
     if git_root is not None:
