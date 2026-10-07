@@ -127,6 +127,21 @@ def test_upgrade_checks_mocked_pypi_and_prints_command(monkeypatch, capsys):
     assert "defaulting to no" in out
 
 
+def test_update_yes_runs_upgrade_without_prompt(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "__version__", "1.0.0")
+    monkeypatch.setattr(cli.urllib.request, "urlopen", lambda *_args, **_kwargs: _PyPIResponse("2.0.0"))
+    monkeypatch.setattr(cli, "_uses_uv_tool", lambda: True)
+    monkeypatch.setattr(cli, "is_interactive", lambda: False)
+    ran = []
+    monkeypatch.setattr(
+        cli.subprocess, "run", lambda cmd, **_kw: ran.append(cmd) or type("R", (), {"returncode": 0})()
+    )
+
+    assert main(["update", "--yes"]) == 0
+    assert ran == [["uv", "tool", "upgrade", "quackspace"]]
+    assert "✓ upgraded quackspace" in capsys.readouterr().out
+
+
 def test_upgrade_handles_network_failure(monkeypatch, capsys):
     monkeypatch.setattr(
         cli.urllib.request, "urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline"))

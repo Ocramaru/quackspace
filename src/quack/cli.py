@@ -207,6 +207,9 @@ def build_parser() -> argparse.ArgumentParser:
         "upgrade", aliases=["update"], help="check for and install a newer quackspace release"
     )
     _add_root_arg(p_upgrade)
+    p_upgrade.add_argument(
+        "-y", "--yes", action="store_true", help="upgrade without asking for confirmation"
+    )
 
     p_uninstall = sub.add_parser("uninstall", help="remove quack integration and the package")
     _add_root_arg(p_uninstall)
@@ -1003,8 +1006,8 @@ def _package_command(action: str) -> list[str]:
     if _uses_uv_tool():
         return ["uv", "tool", "upgrade" if action == "upgrade" else "uninstall", "quackspace"]
     if action == "upgrade":
-        return ["python", "-m", "pip", "install", "--upgrade", "quackspace"]
-    return ["python", "-m", "pip", "uninstall", "-y", "quackspace"]
+        return [sys.executable, "-m", "pip", "install", "--upgrade", "quackspace"]
+    return [sys.executable, "-m", "pip", "uninstall", "-y", "quackspace"]
 
 
 def _safe_confirm(prompt: str, *, default: bool = False) -> bool:
@@ -1043,7 +1046,7 @@ def _run_upgrade(args) -> int:
     command = _package_command("upgrade")
     printable = " ".join(command)
     print(f"upgrade: {printable}")
-    if not _safe_confirm("Run the upgrade now?", default=False):
+    if not getattr(args, "yes", False) and not _safe_confirm("Run the upgrade now?", default=False):
         print("  skipped")
         return 0
     try:
