@@ -200,6 +200,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="show pending index and embedding work")
     _add_root_arg(p_status)
 
+    p_info = sub.add_parser("info", help="show read-only stats for the current space")
+    _add_root_arg(p_info)
+    p_info.add_argument("--json", action="store_true", help="emit the stats as one JSON object")
+
     p_sync = sub.add_parser("sync", help="incrementally refresh the index and embeddings")
     _add_root_arg(p_sync)
 
@@ -949,6 +953,48 @@ def _run_status(args) -> int:
     return 0
 
 
+def _human_size(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _run_info(args) -> int:
+    import json
+
+    from .info import space_info
+
+    info = space_info(args.root)
+    if info is None:
+        if args.json:
+            print(json.dumps({"catalog": False}))
+        else:
+            print("No catalog found. Run `quack init` or `quack reindex`.")
+        return 0
+    if args.json:
+        print(json.dumps({"catalog": True, **info}))
+        return 0
+    emb = info["embedding"]
+    print(f"Space: {info['root']}")
+    print(f"  files indexed:      {info['files']:,}")
+    print(f"  embedded:           {info['embedded']:,}")
+    print(f"  missing embeddings: {info['missing_embeddings']:,}")
+    print(f"  folders:            {info['folders']:,}")
+    print(f"  total size:         {_human_size(info['total_size'])}")
+    types = ", ".join(f"{t['type']} ({t['files']:,})" for t in info["top_types"])
+    print(f"  top file types:     {types or '-'}")
+    print(f"  last indexed:       {info['last_indexed'] or 'never'}")
+    print(f"  last embedded:      {info['last_embedded'] or 'never'}")
+    if emb["enabled"]:
+        print(f"  embedding:          {emb['provider'] or '?'} / {emb['model'] or '?'}")
+    else:
+        print("  embedding:          not configured")
+    return 0
+
+
 def _run_sync(args) -> int:
     from .embed import EmbedNotConfigured, build_embeddings
     from .sync import pending_work
@@ -1167,6 +1213,9 @@ def _dispatch(argv: list[str] | None) -> int:
 
     if args.command == "status":
         return _run_status(args)
+
+    if args.command == "info":
+        return _run_info(args)
 
     if args.command == "sync":
         return _run_sync(args)

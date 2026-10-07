@@ -35,6 +35,22 @@ class PendingWork:
         )
 
 
+def fresh_embedded(con, command: str) -> set[str]:
+    """Indexed files whose stored vector matches their current content.
+
+    Same freshness join as semantic search: stale vectors (file changed since
+    embedding) and vectors for files no longer indexed don't count.
+    """
+    return {
+        rel
+        for (rel,) in con.execute(
+            "SELECT DISTINCT e.rel FROM embeddings e JOIN files f ON f.rel = e.rel "
+            "WHERE e.source_hash = sha256(? || chr(0) || f.embed_source_hash)",
+            [command],
+        ).fetchall()
+    }
+
+
 def pending_work(explicit_root: str | None = None) -> PendingWork:
     """Disk/catalog drift plus embeddable files lacking vectors — cheaply.
 
@@ -75,9 +91,7 @@ def pending_work(explicit_root: str | None = None) -> PendingWork:
             candidate_rows: list = []
             if embeddings_enabled:
                 try:
-                    embedded = {
-                        rel for (rel,) in con.execute("SELECT rel FROM embeddings").fetchall()
-                    }
+                    embedded = fresh_embedded(con, config.embed.command)
                 except Exception:
                     embedded = set()
                 candidate_rows = con.execute(
