@@ -23,6 +23,7 @@ class PendingWork:
     modified: set[str] = field(default_factory=set)
     deleted: set[str] = field(default_factory=set)
     missing_embeddings: set[str] = field(default_factory=set)
+    stale_embeddings: set[str] = field(default_factory=set)
 
     @property
     def index_count(self) -> int:
@@ -31,7 +32,11 @@ class PendingWork:
     @property
     def nothing_to_do(self) -> bool:
         return self.catalog_exists and not (
-            self.new or self.modified or self.deleted or self.missing_embeddings
+            self.new
+            or self.modified
+            or self.deleted
+            or self.missing_embeddings
+            or self.stale_embeddings
         )
 
 
@@ -71,17 +76,21 @@ def pending_work(explicit_root: str | None = None) -> PendingWork:
                     "SELECT rel, file_modified FROM files"
                 ).fetchall()
             }
-            embedded: set[str] = set()
+            embedded: dict[str, str] = {}
             candidate_rows: list = []
             if embeddings_enabled:
                 try:
                     embedded = {
-                        rel for (rel,) in con.execute("SELECT rel FROM embeddings").fetchall()
+                        rel: source_hash or ""
+                        for rel, source_hash in con.execute(
+                            "SELECT rel, source_hash FROM embeddings"
+                        ).fetchall()
                     }
                 except Exception:
-                    embedded = set()
+                    embedded = {}
                 candidate_rows = con.execute(
-                    "SELECT rel, ext, description, tags_csv, is_binary FROM files"
+                    "SELECT rel, ext, description, tags_csv, is_binary, embed_source_hash "
+                    "FROM files"
                 ).fetchall()
         finally:
             con.close()
@@ -95,14 +104,15 @@ def pending_work(explicit_root: str | None = None) -> PendingWork:
     modified = {rel for rel in current & indexed if files[rel] != stored[rel]}
 
     missing_embeddings: set[str] = set()
+    stale_embeddings: set[str] = set()
     if embeddings_enabled:
         embed = config.embed
         ne_extensions = DEFAULT_NONEMBEDDABLE_EXTENSIONS | frozenset(embed.nonembeddable_extensions)
         ne_tags = DEFAULT_NONEMBEDDABLE_TAGS | frozenset(embed.nonembeddable_tags)
         ne_dirs = DEFAULT_NONEMBEDDABLE_DIRS | frozenset(embed.nonembeddable_dirs)
-        for rel, ext, description, tags_csv, is_binary in candidate_rows:
-            # Only files still on disk and not already embedded can be "missing".
-            if rel not in current or rel in embedded:
+        for rel, ext, description, tags_csv, is_binary, source_hash in candidate_rows:
+            # Only files still on disk can be missing or stale.
+            if rel not in current:
                 continue
             entry = SimpleNamespace(
                 rel=rel,
@@ -111,8 +121,13 @@ def pending_work(explicit_root: str | None = None) -> PendingWork:
                 tags=tags_csv.split(",") if tags_csv else [],
                 is_binary=bool(is_binary),
             )
-            if catalog.embeddable(entry, ne_extensions, ne_tags, ne_dirs):
+            if not catalog.embeddable(entry, ne_extensions, ne_tags, ne_dirs):
+                continue
+            if rel not in embedded:
                 missing_embeddings.add(rel)
+            elif embedded[rel] != catalog.embed_cache_hash(source_hash or "", embed.command):
+                # The key `quack embed` compares: sha256(command \0 source hash).
+                stale_embeddings.add(rel)
 
     return PendingWork(
         catalog_exists=True,
@@ -120,4 +135,5 @@ def pending_work(explicit_root: str | None = None) -> PendingWork:
         modified=modified,
         deleted=deleted,
         missing_embeddings=missing_embeddings,
+        stale_embeddings=stale_embeddings,
     )

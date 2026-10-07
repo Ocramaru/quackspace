@@ -83,6 +83,7 @@ quack embed init            # choose embeddings (Ollama recommended)
 quack embed init --provider ollama --pull  # pull/use local nomic-embed-text
 quack embed                 # build semantic embeddings
 quack new "Title" -f folder -d "..." -t tag,tag   # new markdown note
+quack status                # read-only: files needing reindex (new/modified/deleted) or re-embedding
 quack doctor                # check links, descriptions, MCP registration
 quack clean --dry-run       # show generated artifacts clean would remove
 quack clean --diagrams      # remove only generated Mermaid diagrams

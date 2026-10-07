@@ -84,5 +84,8 @@ entire graph to find a few neighbours. Read cost scales with *relevance*.
   file then `reindex()` once. No per-file model call; you write what you know.
 - New Markdown note: `quack new "Title" -f folder -d "..." -t tag,tag`.
 - After any structural change run `quack reindex` (also refreshes diagrams).
+- `quack status` is a read-only check: it lists files that need a reindex (new,
+  modified, deleted) and files that need re-embedding (no vector, or a stale one),
+  up to 10 paths per group. `quack sync` applies the fixes.
 - `quack doctor` reports broken wikilinks (the only hard fault), plus missing or
   stale descriptions.
