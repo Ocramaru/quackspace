@@ -325,3 +325,91 @@ def test_opt_out_skips_nested_repos(tmp_path):
     assert not (alpha / ".gitignore").exists()
     assert summary.opted_out is True
     assert "gitignore: false" in summary.format(quack_root)
+
+
+# ---------------------------------------------------------------------------
+# Skip patterns the user's own rules already cover (MAR-163)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("existing", [".index.yaml", "/.index.yaml", "**/.index.yaml"])
+def test_existing_index_rule_not_duplicated(tmp_path, existing):
+    git_root = _make_git_repo(tmp_path / "repo")
+    quack_root = _make_quack_root(git_root)
+    gi = git_root / ".gitignore"
+    gi.write_text(f"{existing}\n")
+    ensure_gitignore(quack_root)
+    content = gi.read_text()
+    assert content.count(".index.yaml") == 1
+    assert "_diagrams.md" in content
+    assert BLOCK_HEADER in content
+    first = content
+    ensure_gitignore(quack_root)
+    assert gi.read_text() == first
+
+
+def test_existing_diagrams_rule_not_duplicated(tmp_path):
+    git_root = _make_git_repo(tmp_path / "repo")
+    quack_root = _make_quack_root(git_root)
+    gi = git_root / ".gitignore"
+    gi.write_text("*.pyc\n_diagrams.md\n")
+    ensure_gitignore(quack_root)
+    content = gi.read_text()
+    assert content.count("_diagrams.md") == 1
+    assert ".index.yaml" in content
+    assert "*.pyc" in content
+    first = content
+    ensure_gitignore(quack_root)
+    assert gi.read_text() == first
+
+
+def test_nested_repo_existing_rules_not_duplicated(tmp_path):
+    quack_root = _make_quack_root(tmp_path / "space")
+    alpha = _make_git_repo(quack_root / "projects" / "alpha")
+    gi = alpha / ".gitignore"
+    gi.write_text(".index.yaml\n_diagrams.md\n")
+    ensure_gitignore(quack_root)
+    assert gi.read_text() == ".index.yaml\n_diagrams.md\n"
+    ensure_gitignore(quack_root)
+    assert gi.read_text() == ".index.yaml\n_diagrams.md\n"
+
+
+def test_nested_repo_partial_existing_rule(tmp_path):
+    quack_root = _make_quack_root(tmp_path / "space")
+    alpha = _make_git_repo(quack_root / "projects" / "alpha")
+    gi = alpha / ".gitignore"
+    gi.write_text("build/\n.index.yaml\n")
+    ensure_gitignore(quack_root)
+    content = gi.read_text()
+    assert content.count(".index.yaml") == 1
+    assert content.count("_diagrams.md") == 1
+    assert "build/" in content
+
+
+def test_stale_managed_duplicate_removed_when_user_adds_rule(tmp_path):
+    git_root = _make_git_repo(tmp_path / "repo")
+    quack_root = _make_quack_root(git_root)
+    gi = git_root / ".gitignore"
+    ensure_gitignore(quack_root)
+    gi.write_text(".index.yaml\n" + gi.read_text())
+    ensure_gitignore(quack_root)
+    assert gi.read_text().count(".index.yaml") == 1
+
+
+def test_leading_space_rule_is_not_treated_as_existing(tmp_path):
+    git_root = _make_git_repo(tmp_path / "repo")
+    quack_root = _make_quack_root(git_root)
+    gi = git_root / ".gitignore"
+    gi.write_text(" .index.yaml\n")
+    ensure_gitignore(quack_root)
+    lines = gi.read_text().splitlines()
+    assert ".index.yaml" in lines
+    assert " .index.yaml" in lines
+
+
+def test_trailing_space_rule_still_counts_as_existing(tmp_path):
+    git_root = _make_git_repo(tmp_path / "repo")
+    quack_root = _make_quack_root(git_root)
+    gi = git_root / ".gitignore"
+    gi.write_text(".index.yaml  \n")
+    ensure_gitignore(quack_root)
+    assert gi.read_text().count(".index.yaml") == 1

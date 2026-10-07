@@ -114,18 +114,30 @@ def _find_descendant_git_roots(
     return result
 
 
-def _build_block(quack_root: Path, git_root: Path) -> str:
+def _build_block(quack_root: Path, git_root: Path) -> list[str]:
     try:
         rel = quack_root.relative_to(git_root)
         prefix = rel.as_posix() + "/" if rel != Path(".") else ""
     except ValueError:
         prefix = ""
-    patterns = [*_TREE_PATTERNS, f"{prefix}QUACK.md", f"{prefix}.quack/"]
-    return "\n" + "\n".join([BLOCK_HEADER, *patterns]) + "\n"
+    return [*_TREE_PATTERNS, f"{prefix}QUACK.md", f"{prefix}.quack/"]
 
 
-def _build_nested_block() -> str:
-    return "\n" + "\n".join([BLOCK_HEADER, *_TREE_PATTERNS]) + "\n"
+def _build_nested_block() -> list[str]:
+    return list(_TREE_PATTERNS)
+
+
+def _normalize_rule(line: str) -> str | None:
+    """Canonical form of a .gitignore rule, or None for blanks/comments/negations."""
+    line = line.rstrip("\r\n")
+    # Trailing spaces are ignored unless escaped with a backslash; leading ones are significant.
+    while line.endswith(" ") and not line.endswith("\\ "):
+        line = line[:-1]
+    if not line or line.startswith(("#", "!")):
+        return None
+    while line.startswith(("/", "**/")):
+        line = line[1:] if line.startswith("/") else line[3:]
+    return line or None
 
 
 def _find_block(content: str) -> tuple[int, int] | None:
@@ -149,29 +161,38 @@ def _find_block(content: str) -> tuple[int, int] | None:
     return start, pos
 
 
-def _apply_block(gitignore_path: Path, block: str) -> bool:
+def _apply_block(gitignore_path: Path, patterns: list[str]) -> bool:
     """Idempotently insert or refresh the managed block in a .gitignore file."""
     content = gitignore_path.read_text() if gitignore_path.exists() else ""
-    new_content = _content_with_block(content, block)
+    new_content = _content_with_block(content, patterns)
     if new_content != content:
         gitignore_path.write_text(new_content)
         return True
     return False
 
 
-def _content_with_block(content: str, block: str) -> str:
+def _content_with_block(content: str, patterns: list[str]) -> str:
     block_range = _find_block(content)
+    user_content = content
+    if block_range:
+        user_content = content[: block_range[0]] + content[block_range[1] :]
+    # Skip patterns the user's own lines already cover.
+    existing = {r for r in map(_normalize_rule, user_content.splitlines()) if r}
+    keep = [p for p in patterns if _normalize_rule(p) not in existing]
+    block = "\n" + "\n".join([BLOCK_HEADER, *keep]) + "\n" if keep else ""
     if block_range:
         s, e = block_range
         return content[:s] + block + content[e:]
+    if not block:
+        return content
     if content and not content.endswith("\n"):
         content += "\n"
     return content + block
 
 
-def _would_apply_block(gitignore_path: Path, block: str) -> bool:
+def _would_apply_block(gitignore_path: Path, patterns: list[str]) -> bool:
     content = gitignore_path.read_text() if gitignore_path.exists() else ""
-    return _content_with_block(content, block) != content
+    return _content_with_block(content, patterns) != content
 
 
 def _gitignore_opt_out(quack_root: Path) -> bool:
