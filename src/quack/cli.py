@@ -917,7 +917,7 @@ def _run_map(args) -> int:
     return 0
 
 
-def _print_pending_examples(label: str, paths: set[str], limit: int = 5) -> None:
+def _print_pending_examples(label: str, paths: set[str], limit: int = 10) -> None:
     if not paths:
         return
     for rel in sorted(paths)[:limit]:
@@ -941,10 +941,12 @@ def _run_status(args) -> int:
     print(f"  modified:           {len(pending.modified):,}")
     print(f"  deleted:            {len(pending.deleted):,}")
     print(f"  missing embeddings: {len(pending.missing_embeddings):,}")
+    print(f"  stale embeddings:   {len(pending.stale_embeddings):,}")
     _print_pending_examples("new", pending.new)
     _print_pending_examples("modified", pending.modified)
     _print_pending_examples("deleted", pending.deleted)
     _print_pending_examples("embed", pending.missing_embeddings)
+    _print_pending_examples("stale", pending.stale_embeddings)
     print("  run `quack sync` to update")
     return 0
 

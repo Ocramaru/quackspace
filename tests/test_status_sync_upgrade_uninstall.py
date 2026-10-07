@@ -4,9 +4,10 @@ import json
 import os
 from types import SimpleNamespace
 
+import duckdb
 import yaml
 
-from quack import cli
+from quack import catalog, cli
 from quack.cli import main
 from quack.indexer import reindex
 from quack.scaffold import scaffold_root
@@ -52,6 +53,65 @@ def test_status_is_current_when_embeddings_are_not_configured(tmp_path, capsys):
 
     assert main(["status", "--root", str(root)]) == 0
     assert capsys.readouterr().out.strip() == "✓ up to date"
+
+
+def _embedded_space(tmp_path, names, stale=()):
+    root = scaffold_root(str(tmp_path / "space"))
+    config_path = root / ".quack" / "config.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    config["embed"]["command"] = "echo"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+    for name in names:
+        (root / name).write_text(f"{name} body\n")
+    reindex(str(root))
+    con = duckdb.connect(str(root / ".quack" / catalog.DB_NAME))
+    try:
+        con.execute("CREATE TABLE embeddings (name VARCHAR, rel VARCHAR, source_hash VARCHAR, vec FLOAT[2])")
+        for rel, source_hash in con.execute("SELECT rel, embed_source_hash FROM files").fetchall():
+            if rel not in names:
+                continue
+            key = "wrong" if rel in stale else catalog.embed_cache_hash(source_hash, "echo")
+            con.execute("INSERT INTO embeddings VALUES (?, ?, ?, [0.0, 1.0])", [rel, rel, key])
+    finally:
+        con.close()
+    return root
+
+
+def _snapshot(directory):
+    return {str(path): path.read_bytes() for path in sorted(directory.rglob("*")) if path.is_file()}
+
+
+def test_status_flags_stale_embeddings_and_is_read_only(tmp_path, capsys):
+    root = _embedded_space(tmp_path, ["fresh.md", "old.md", "other.md"], stale={"old.md"})
+    (root / "novec.md").write_text("no vector\n")
+    reindex(str(root))
+    before = _snapshot(root / ".quack")
+
+    pending = pending_work(str(root))
+    assert pending.stale_embeddings == {"old.md"}
+    assert "novec.md" in pending.missing_embeddings
+    assert "fresh.md" not in pending.stale_embeddings | pending.missing_embeddings
+
+    assert main(["status", "--root", str(root)]) == 0
+    assert main(["status", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "stale embeddings:   1" in out
+    assert "stale: old.md" in out
+    assert _snapshot(root / ".quack") == before
+
+
+def test_status_caps_paths_at_ten(tmp_path, capsys):
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "seed.md").write_text("seed\n")
+    reindex(str(root))
+    for index in range(13):
+        (root / f"new{index:02d}.md").write_text("new\n")
+
+    assert main(["status", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "new:                13" in out
+    assert out.count("    new: new") == 10
+    assert "… and 3 more" in out
 
 
 def test_sync_reindexes_then_is_noop_without_embed_config(tmp_path, capsys, monkeypatch):
