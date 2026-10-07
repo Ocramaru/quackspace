@@ -474,7 +474,7 @@ def _ollama_model_exists(model: str) -> bool:
 
 def build_embeddings(
     explicit_root: str | None = None,
-    progress: "Callable[[int, int, str], None] | None" = None,
+    progress: "Callable[[int | None, int | None, str], None] | None" = None,
     *,
     rebuild: bool = False,
     timeout: int | None = None,
@@ -499,16 +499,22 @@ def build_embeddings(
         config.embed.timeout = timeout
 
     provider_label = config.embed.provider or "custom"
-    if progress is not None:
-        progress(0, 1, f"Connecting to {provider_label} embeddings")
 
+    def _phase(message: str) -> None:
+        # No counts yet: the CLI shows a spinner instead of an n/total bar.
+        if progress is not None:
+            progress(None, None, message)
+
+    _phase("Scanning files")
     space = Space.load(explicit_root)
     path = db_path(space)
     if not path.exists():
         raise RuntimeError(f"No catalog at {path}. Run `quack reindex` first.")
 
+    _phase("Loading metadata")
     from . import folders as _folders
 
+    _phase("Resolving folders")
     folder_infos = _folders.resolve_folders(space)
     by_folder: dict[str, list] = defaultdict(list)
     for e in space.entries:
@@ -551,17 +557,66 @@ def build_embeddings(
             (i.rel, i.parent, embed_cache_hash(source_hash, cfg.command), text)
         )
 
-    if cfg.provider == "ollama":
-        _ensure_ollama_server(timeout=cfg.timeout)
-
     invalidate(path)  # free any cached read-only connection before writing
     con = duckdb.connect(str(path))
     try:
         con.execute("INSTALL vss; LOAD vss;")
         con.execute("SET hnsw_enable_experimental_persistence = true;")
 
-        existing_dim = _existing_vector_dim(con)
-        dim = cfg.dim or existing_dim
+        _phase("Checking existing embeddings")
+        dim = cfg.dim or _existing_vector_dim(con)
+
+        def _prepare_tables(table_dim: int) -> tuple[dict, dict, int, int]:
+            if rebuild or not _embedding_schema_matches(con, table_dim):
+                con.execute("DROP TABLE IF EXISTS embeddings;")
+                con.execute("DROP TABLE IF EXISTS folder_embeddings;")
+                con.execute("DROP TABLE IF EXISTS embedding_runs;")
+
+            _ensure_embedding_schema(con, table_dim)
+            # Read existing hashes AFTER any potential rebuild drop so that rebuild=True
+            # correctly treats all items as uncached.
+            hashes_files = _existing_hashes(con, "embeddings", "rel")
+            hashes_folders = _existing_hashes(con, "folder_embeddings", "folder")
+            con.execute("BEGIN TRANSACTION")
+            pruned_files = _prune_missing(
+                con, "embeddings", "rel", [r for r, _, _, _ in file_items]
+            )
+            pruned_folders = _prune_missing(
+                con, "folder_embeddings", "folder", [r for r, _, _, _ in folder_items]
+            )
+            return hashes_files, hashes_folders, pruned_files, pruned_folders
+
+        # Without a known dim the tables cannot be created yet; nothing is cached
+        # then, so everything is planned and the tables are prepared after the probe.
+        old_files: dict = {}
+        old_folders: dict = {}
+        deleted_files = deleted_folders = 0
+        if dim:
+            old_files, old_folders, deleted_files, deleted_folders = _prepare_tables(dim)
+
+        _phase("Planning embedding work")
+        # Build the work queue: items whose hash changed since last run.
+        # type tag: 'f' = file, 'd' = folder.
+        todo: list[tuple] = []
+        skipped_files = skipped_folders = 0
+        for rel, name, source_hash, text in file_items:
+            if old_files.get(rel) == source_hash:
+                skipped_files += 1
+            else:
+                todo.append(("f", rel, name, source_hash, text))
+        for rel, parent, source_hash, text in folder_items:
+            if old_folders.get(rel) == source_hash:
+                skipped_folders += 1
+            else:
+                todo.append(("d", rel, parent, source_hash, text))
+
+        n_todo = len(todo)
+        total = n_todo + 3  # +3: two HNSW index steps + embedding_runs record
+        if progress is not None:
+            progress(0, total, f"Connecting to {provider_label} embeddings")
+
+        if cfg.provider == "ollama":
+            _ensure_ollama_server(timeout=cfg.timeout)
 
         # If dim is still unknown, probe until one item succeeds. A single bad
         # file should not make the whole embedding run unusable.
@@ -581,44 +636,10 @@ def build_embeddings(
                 dim = len(probe_vec)
                 probe_key = (kind, rel)
                 break
-        if not dim:
-            raise RuntimeError("Could not determine embedding dimension.")
+            if not dim:
+                raise RuntimeError("Could not determine embedding dimension.")
+            _, _, deleted_files, deleted_folders = _prepare_tables(dim)
 
-        if rebuild or not _embedding_schema_matches(con, dim):
-            con.execute("DROP TABLE IF EXISTS embeddings;")
-            con.execute("DROP TABLE IF EXISTS folder_embeddings;")
-            con.execute("DROP TABLE IF EXISTS embedding_runs;")
-
-        _ensure_embedding_schema(con, dim)
-        # Read existing hashes AFTER any potential rebuild drop so that rebuild=True
-        # correctly treats all items as uncached.
-        old_files = _existing_hashes(con, "embeddings", "rel")
-        old_folders = _existing_hashes(con, "folder_embeddings", "folder")
-        con.execute("BEGIN TRANSACTION")
-        deleted_files = _prune_missing(
-            con, "embeddings", "rel", [r for r, _, _, _ in file_items]
-        )
-        deleted_folders = _prune_missing(
-            con, "folder_embeddings", "folder", [r for r, _, _, _ in folder_items]
-        )
-
-        # Build the work queue: items whose hash changed since last run.
-        # type tag: 'f' = file, 'd' = folder.
-        todo: list[tuple] = []
-        skipped_files = skipped_folders = 0
-        for rel, name, source_hash, text in file_items:
-            if old_files.get(rel) == source_hash:
-                skipped_files += 1
-            else:
-                todo.append(("f", rel, name, source_hash, text))
-        for rel, parent, source_hash, text in folder_items:
-            if old_folders.get(rel) == source_hash:
-                skipped_folders += 1
-            else:
-                todo.append(("d", rel, parent, source_hash, text))
-
-        n_todo = len(todo)
-        total = n_todo + 3  # +3: two HNSW index steps + embedding_runs record
         n_workers, max_workers, backend_label = _embedding_worker_limits(cfg, workers)
         if backend_label is not None and progress is not None:
             progress(0, total, f"Ollama {backend_label}, {n_workers} worker(s)")
