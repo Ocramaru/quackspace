@@ -623,6 +623,58 @@ def test_embed_nothing_to_do_has_only_uncounted_status(tmp_path, monkeypatch):
     assert calls[-1] == (None, None, "Nothing to embed; embeddings already up to date")
 
 
+def test_embed_delete_only_has_no_zero_total_progress(tmp_path, monkeypatch):
+    from quack import embed as embed_mod
+    from quack.indexer import reindex
+
+    root = _configured_embed_space(tmp_path, monkeypatch)
+    build_embeddings(str(root), workers=1)
+    (root / "note.md").unlink()
+    reindex(str(root))
+    monkeypatch.setattr(
+        embed_mod,
+        "_embedding_worker_limits",
+        lambda _cfg, _workers: (1, 1, "CPU"),
+    )
+    calls = []
+
+    summary = build_embeddings(
+        str(root),
+        progress=lambda done, total, message: calls.append((done, total, message)),
+    )
+
+    assert summary["deleted"] == 1
+    assert not [(done, total) for done, total, _message in calls
+                if done is not None or total is not None]
+
+
+def test_embed_up_to_date_repairs_missing_hnsw_index(tmp_path, monkeypatch):
+    import duckdb
+
+    from quack import catalog
+
+    root = _configured_embed_space(tmp_path, monkeypatch)
+    build_embeddings(str(root), workers=1)
+    path = catalog.resolve_db(str(root))
+    con = duckdb.connect(str(path))
+    try:
+        con.execute("LOAD vss;")
+        con.execute("DROP INDEX emb_hnsw;")
+    finally:
+        con.close()
+
+    summary = build_embeddings(str(root), workers=1)
+
+    assert summary["up_to_date"] is True
+    con = duckdb.connect(str(path), read_only=True)
+    try:
+        assert con.execute(
+            "SELECT count(*) FROM duckdb_indexes() WHERE index_name = 'emb_hnsw'"
+        ).fetchone()[0] == 1
+    finally:
+        con.close()
+
+
 def test_embed_parallel_progress_is_ordered_without_duplicates(tmp_path, monkeypatch):
     root = _configured_embed_space(
         tmp_path,

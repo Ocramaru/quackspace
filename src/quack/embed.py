@@ -626,8 +626,23 @@ def build_embeddings(
         n_todo = len(todo)
         total = n_todo
         if not n_todo and not deleted_files and not deleted_folders:
+            _phase("Indexing file vectors")
+            _ensure_hnsw_index(
+                con,
+                "embeddings",
+                "emb_hnsw",
+                rebuild=False,
+            )
+            _phase("Indexing folder vectors")
+            _ensure_hnsw_index(
+                con,
+                "folder_embeddings",
+                "folder_emb_hnsw",
+                rebuild=False,
+            )
             n_folders = con.execute("SELECT count(*) FROM folder_embeddings").fetchone()[0]
             n = con.execute("SELECT count(*) FROM embeddings").fetchone()[0]
+            con.execute("COMMIT")
             _phase("Nothing to embed; embeddings already up to date")
             return {
                 "embedded": n,
@@ -645,7 +660,7 @@ def build_embeddings(
                 "up_to_date": True,
             }
         n_workers, max_workers, backend_label = _embedding_worker_limits(cfg, workers)
-        if backend_label is not None and progress is not None:
+        if n_todo and backend_label is not None and progress is not None:
             progress(0, total, f"Ollama {backend_label}, {n_workers} worker(s)")
 
         def _do_embed(item: tuple) -> tuple:
