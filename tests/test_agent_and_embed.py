@@ -567,6 +567,161 @@ def test_embed_build_honors_include_body_false(tmp_path, monkeypatch):
     assert all("body:" not in text for text in file_texts)
 
 
+def _configured_embed_space(tmp_path, monkeypatch, *, files=("note.md",)):
+    import yaml
+
+    from quack import embed as embed_mod
+    from quack.indexer import reindex
+
+    root = scaffold_root(str(tmp_path / "space"))
+    for filename in files:
+        (root / filename).write_text(f"hello from {filename}\n")
+    reindex(str(root))
+
+    cfg = root / ".quack" / "config.yaml"
+    data = yaml.safe_load(cfg.read_text())
+    data["embed"] = {"command": "test embedder", "dim": 2, "timeout": 10}
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False))
+    monkeypatch.setattr(embed_mod, "_embed_text", lambda _cfg, _text: [0.1, 0.2])
+    return root
+
+
+def test_embed_progress_phases_precede_planned_total(tmp_path, monkeypatch):
+    root = _configured_embed_space(tmp_path, monkeypatch)
+    calls = []
+
+    summary = build_embeddings(
+        str(root),
+        progress=lambda done, total, message: calls.append((done, total, message)),
+        workers=1,
+    )
+
+    assert calls[0] == (None, None, "Loading catalog")
+    assert not any("Connecting" in message for _done, _total, message in calls)
+    scanning = calls.index((None, None, "Scanning files and folders"))
+    planning = calls.index((None, None, "Planning embeddings"))
+    first_counted = next(i for i, (done, total, _message) in enumerate(calls)
+                         if done is not None or total is not None)
+    assert scanning < planning < first_counted
+    assert calls[first_counted][1] == summary["updated"] + summary["folders_updated"]
+
+
+def test_embed_nothing_to_do_has_only_uncounted_status(tmp_path, monkeypatch):
+    root = _configured_embed_space(tmp_path, monkeypatch)
+    build_embeddings(str(root), workers=1)
+    calls = []
+
+    summary = build_embeddings(
+        str(root),
+        progress=lambda done, total, message: calls.append((done, total, message)),
+        workers=1,
+    )
+
+    assert summary["up_to_date"] is True
+    assert not [(done, total) for done, total, _message in calls
+                if done is not None or total is not None]
+    assert calls[-1] == (None, None, "Nothing to embed; embeddings already up to date")
+
+
+def test_embed_parallel_progress_is_ordered_without_duplicates(tmp_path, monkeypatch):
+    root = _configured_embed_space(
+        tmp_path,
+        monkeypatch,
+        files=("one.md", "two.md", "three.md"),
+    )
+    calls = []
+
+    summary = build_embeddings(
+        str(root),
+        progress=lambda done, total, message: calls.append((done, total, message)),
+        workers=3,
+    )
+
+    counted = [(done, total) for done, total, _message in calls if done is not None]
+    queued = summary["updated"] + summary["folders_updated"]
+    assert counted == [(done, queued) for done in range(1, queued + 1)]
+    phase_messages = [message for done, total, message in calls
+                      if done is None and total is None]
+    assert phase_messages == [
+        "Loading catalog",
+        "Scanning files and folders",
+        "Planning embeddings",
+        "Indexing file vectors",
+        "Indexing folder vectors",
+        "Recording embedding run",
+        "Embeddings ready",
+    ]
+
+
+def test_embed_cli_renders_early_phase_without_progress_bar(monkeypatch, capsys):
+    from quack import _duck
+    from quack import embed as embed_mod
+
+    frames = []
+
+    class CapturingDuckProgress(_duck.DuckProgress):
+        def update(self, done=None, total=None, message=None):
+            super().update(done=done, total=total, message=message)
+            frames.append(
+                _duck._frame(
+                    0,
+                    self.message,
+                    done=self.done,
+                    total=self.total,
+                    width=80,
+                )
+            )
+
+    def fake_build_embeddings(_root, *, progress, **_kwargs):
+        progress(None, None, "Loading catalog")
+        progress(0, 4, "Embedding files")
+        return {
+            "embedded": 0,
+            "folders": 0,
+            "dim": 2,
+            "updated": 0,
+            "deleted": 0,
+            "folders_updated": 0,
+            "folders_deleted": 0,
+        }
+
+    monkeypatch.setattr(_duck, "DuckProgress", CapturingDuckProgress)
+    monkeypatch.setattr(embed_mod, "build_embeddings", fake_build_embeddings)
+
+    assert main(["embed", "--root", "/unused"]) == 0
+    capsys.readouterr()
+
+    assert "Loading catalog" in frames[0]
+    assert "0/4" not in frames[0]
+    assert "━━━━" not in frames[0]
+    assert "0/4 0%" in frames[1]
+
+
+def test_embed_cli_prints_single_up_to_date_line(monkeypatch, capsys):
+    from quack import embed as embed_mod
+
+    def fake_build_embeddings(_root, *, progress, **_kwargs):
+        progress(None, None, "Nothing to embed; embeddings already up to date")
+        return {
+            "embedded": 0,
+            "folders": 0,
+            "dim": 2,
+            "updated": 0,
+            "deleted": 0,
+            "folders_updated": 0,
+            "folders_deleted": 0,
+            "up_to_date": True,
+        }
+
+    monkeypatch.setattr(embed_mod, "build_embeddings", fake_build_embeddings)
+
+    assert main(["embed", "--root", "/unused"]) == 0
+    out = capsys.readouterr().out
+    assert "✓ embeddings already up to date" in out
+    assert "embedded 0" not in out
+    assert "refreshed:" not in out
+
+
 def test_embed_build_skips_failed_items(tmp_path, monkeypatch):
     import yaml
 

@@ -1460,6 +1460,9 @@ def _dispatch(argv: list[str] | None) -> int:
             elif not args.verbose:
                 print("  Run `quack embed --verbose` for full subprocess output.", file=sys.stderr)
             return 1
+        if result.get("up_to_date"):
+            print("✓ embeddings already up to date")
+            return 0
         print(
             f"✓ embedded {result['embedded']:,} file(s) + "
             f"{result['folders']:,} folder(s) (dim {result['dim']})"
