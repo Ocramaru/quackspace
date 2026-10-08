@@ -10,6 +10,7 @@ import yaml
 from quack.core import IgnoreRuleset
 from quack.gitignore import (
     BLOCK_HEADER,
+    _content_with_block,
     ensure_gitignore,
     _find_descendant_git_roots,
 )
@@ -131,6 +132,50 @@ def test_block_refreshed_in_place(tmp_path):
     assert "*.pyc" in content
     assert "*.log" in content
     assert content.count(BLOCK_HEADER) == 1
+
+
+def test_ancestor_block_skips_normalized_user_patterns_and_is_idempotent(tmp_path):
+    git_root = _make_git_repo(tmp_path / "repo")
+    quack_root = _make_quack_root(git_root)
+    gitignore_path = git_root / ".gitignore"
+    gitignore_path.write_text(" /.index.yaml/  \n")
+
+    ensure_gitignore(quack_root)
+    first = gitignore_path.read_text()
+    ensure_gitignore(quack_root)
+
+    assert gitignore_path.read_text() == first
+    assert BLOCK_HEADER in first
+    assert first.count(".index.yaml") == 1
+    assert "_diagrams.md" in first
+
+    gitignore_path.write_text(first.replace(" /.index.yaml/  \n", ""))
+    ensure_gitignore(quack_root)
+    restored = gitignore_path.read_text()
+    assert restored.count(".index.yaml") == 1
+    assert f"{BLOCK_HEADER}\n.index.yaml\n" in restored
+
+
+def test_requested_patterns_are_deduplicated_after_normalizing():
+    content = _content_with_block("", [".index.yaml", "/.index.yaml/"])
+
+    assert content.count(".index.yaml") == 1
+
+
+def test_ancestor_block_collapses_duplicate_managed_patterns(tmp_path):
+    git_root = _make_git_repo(tmp_path / "repo")
+    quack_root = _make_quack_root(git_root)
+    gitignore_path = git_root / ".gitignore"
+    gitignore_path.write_text(
+        f"*.pyc\n\n{BLOCK_HEADER}\n.index.yaml\n.index.yaml\n_diagrams.md\n\n*.log\n"
+    )
+
+    ensure_gitignore(quack_root)
+    content = gitignore_path.read_text()
+
+    assert content.count(BLOCK_HEADER) == 1
+    assert content.count(".index.yaml") == 1
+    assert content.index("*.pyc") < content.index("*.log")
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +348,23 @@ def test_nested_git_repo_preserves_user_lines(tmp_path):
     assert "*.log" in content
     assert "build/" in content
     assert BLOCK_HEADER in content
+
+
+def test_nested_block_skips_user_patterns_and_drops_empty_block(tmp_path):
+    quack_root = _make_quack_root(tmp_path / "space")
+    alpha = _make_git_repo(quack_root / "projects" / "alpha")
+    gitignore_path = alpha / ".gitignore"
+    gitignore_path.write_text(
+        f"/.index.yaml/\n\n{BLOCK_HEADER}\n.index.yaml\n_diagrams.md\n\n _diagrams.md \n"
+    )
+
+    ensure_gitignore(quack_root)
+    first = gitignore_path.read_text()
+    ensure_gitignore(quack_root)
+
+    assert gitignore_path.read_text() == first
+    assert BLOCK_HEADER not in first
+    assert first == "/.index.yaml/\n\n _diagrams.md \n"
 
 
 def test_quack_root_not_in_git_nested_repos_still_get_block(tmp_path):
