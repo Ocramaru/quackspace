@@ -123,6 +123,9 @@ stays about your actual work:
   files aren't indexed one by one — so a 200k-file data dump can't drown the
   catalog. Set either to `0` in `.quack/config.yaml` to disable.
 
+Quack recognizes common data files (parquet, arrow/feather, csv/tsv, jsonl) as
+queryable data artifacts, with non-sticky default descriptions and tags.
+
 ## The catalog
 
 `quack.duckdb` is a DuckDB database built by `reindex`. It's the queryable store for everything:
