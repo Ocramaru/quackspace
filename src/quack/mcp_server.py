@@ -329,8 +329,9 @@ def search(
     - `folders`: populated when the query asks about location/which-folder (separate
       list, never blended with file hits). Call `map()` or `sql()` for more folder detail.
 
-    `include_ignored`: also return hits under ignored (.quackignore) or opaque
-    (.git, node_modules, .venv, ...) directories; hidden by default.
+    `include_ignored`: also return hits under ignored (.gitignore or
+    .quackignore) or opaque (.git, node_modules, .venv, ...) directories;
+    hidden by default.
 
     Call `explain()` for a full architecture and schema reference."""
     from .search import route, search_folders

@@ -29,9 +29,8 @@ from .catalog import DB_NAME
 
 
 def _ignored_predicate(explicit_root: str | None) -> Callable[[str, bool], bool]:
-    """``hidden(rel, is_dir)`` built from the indexer's own rules: ``.quackignore``
-    plus built-in ignores (``load_ignores``) and opaque dir names (defaults plus
-    ``index.opaque_dirs``). A path is hidden if it, or any parent directory, is
+    """``hidden(rel, is_dir)`` built from the indexer's own ignore rules and
+    opaque dir names. A path is hidden if it, or any parent directory, is
     ignored or opaque, so rows indexed before a dir became ignored vanish too."""
     root = find_root(explicit_root)
     rules = load_ignores(root)

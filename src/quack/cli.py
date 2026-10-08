@@ -380,7 +380,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument(
         "--include-ignored", "--all", dest="include_ignored", action="store_true",
         help="also return results from directories the indexer ignores "
-             "(.quackignore rules) or treats as opaque (.git, node_modules, .venv, ...)",
+             "(.gitignore and .quackignore rules) or treats as opaque "
+             "(.git, node_modules, .venv, ...)",
     )
     p_search.add_argument(
         "--no-local", action="store_true",

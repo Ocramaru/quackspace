@@ -116,9 +116,11 @@ def test_builtins_override_negation():
 
 def test_load_ignores_returns_ruleset(tmp_path):
     root = scaffold_root(str(tmp_path / "space"))
+    (root / ".gitignore").write_text("git-output\n")
     (root / ".quackignore").write_text("dist\n!dist/keep\n/build\n")
     rs = load_ignores(root)
     assert isinstance(rs, IgnoreRuleset)
+    assert rs.is_ignored("git-output", "git-output")
     assert rs.is_ignored("dist", "dist")
     assert not rs.is_ignored("keep", "dist/keep")
     assert rs.is_ignored("build", "build")
@@ -147,6 +149,23 @@ def test_negation_includes_file_in_index(tmp_path):
 
     assert "logs/audit.log" in rels
     assert "logs/debug.log" not in rels
+
+
+def test_gitignore_excludes_file_from_index(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "generated").mkdir()
+    (root / "generated" / "output.txt").write_text("generated")
+    (root / ".gitignore").write_text("generated/\n")
+
+    reindex(str(root))
+
+    import duckdb
+    db = root / ".quack" / "quack.duckdb"
+    con = duckdb.connect(str(db), read_only=True)
+    rels = {row[0] for row in con.execute("SELECT rel FROM files").fetchall()}
+    con.close()
+
+    assert "generated/output.txt" not in rels
 
 
 def test_anchored_pattern_excludes_only_root_match(tmp_path):
@@ -204,6 +223,23 @@ def test_file_search_hides_opaque_and_ignored_dirs(tmp_path):
     assert _file_rels(root, "zebra") == {"src/zebra-src.txt"}
     assert _file_rels(root, "zebra", include_ignored=True) == {
         "src/zebra-src.txt", "gen/zebra-gen.txt"
+    }
+
+
+def test_file_search_hides_newly_gitignored_path(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "tracked").mkdir()
+    (root / "generated").mkdir()
+    (root / "tracked" / "zebra-source.txt").write_text("zebra")
+    (root / "generated" / "zebra-output.txt").write_text("zebra")
+    reindex(str(root))
+
+    # Query-time filtering hides an already-indexed path without reindexing.
+    (root / ".gitignore").write_text("generated/\n")
+
+    assert _file_rels(root, "zebra") == {"tracked/zebra-source.txt"}
+    assert _file_rels(root, "zebra", include_ignored=True) == {
+        "tracked/zebra-source.txt", "generated/zebra-output.txt"
     }
 
 
