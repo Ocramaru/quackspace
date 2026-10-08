@@ -24,8 +24,33 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import catalog
-from .core import Space, find_root
+from .core import DEFAULT_OPAQUE_DIRS, Space, find_root, load_ignores
 from .catalog import DB_NAME
+
+
+def _ignored_predicate(explicit_root: str | None) -> Callable[[str, bool], bool]:
+    """``hidden(rel, is_dir)`` built from the indexer's own ignore rules and
+    opaque dir names. A path is hidden if it, or any parent directory, is
+    ignored or opaque, so rows indexed before a dir became ignored vanish too."""
+    root = find_root(explicit_root)
+    rules = load_ignores(root)
+    opaque = set(DEFAULT_OPAQUE_DIRS)
+    try:
+        from .config import Config as _Config
+        opaque |= set(_Config.load(explicit_root).index.opaque_dirs)
+    except Exception:
+        pass
+
+    def hidden(rel: str, is_dir: bool = False) -> bool:
+        parts = rel.split("/")
+        for i, part in enumerate(parts):
+            if rules.is_ignored(part, "/".join(parts[: i + 1])):
+                return True
+            if (i < len(parts) - 1 or is_dir) and part in opaque:
+                return True
+        return False
+
+    return hidden
 
 
 def _in_hidden_dir(rel: str) -> bool:
@@ -168,6 +193,7 @@ def search(
     expand: bool = True,
     cwd_rel: str | None = None,
     progress: Callable[[int, int, str], None] | None = None,
+    include_ignored: bool = False,
 ) -> list[Hit]:
     """Auto-hybrid search: fuse every available tier, then expand on the graph.
 
@@ -185,6 +211,7 @@ def search(
     terms = _terms(query)
     if not terms:
         return []
+    hidden = None if include_ignored else _ignored_predicate(explicit_root)
 
     total_steps = 6
     step = 0
@@ -297,7 +324,7 @@ def search(
         hits: dict[str, Hit] = {}
         for name, score in fused.items():
             doc = doc_by_name.get(name)
-            if doc is not None:
+            if doc is not None and not (hidden and hidden(doc.rel)):
                 if hidden_penalty < 1.0 and _in_hidden_dir(doc.rel):
                     score *= hidden_penalty
                 if cwd_rel and local_boost != 1.0 and _in_local_dir(doc.rel, cwd_rel):
@@ -310,7 +337,7 @@ def search(
                 )
         for name, via in related.items():
             doc = doc_by_name.get(name)
-            if doc is not None and name not in hits:
+            if doc is not None and name not in hits and not (hidden and hidden(doc.rel)):
                 hits[name] = Hit(entry=doc, score=0.0, reasons=[], via=[via])
     finally:
         if cur is not None:
@@ -328,6 +355,7 @@ def search_folders(
     limit: int = 10,
     cwd_rel: str | None = None,
     progress: Callable[[int, int, str], None] | None = None,
+    include_ignored: bool = False,
 ) -> list[FolderHit]:
     """Folder-level search, kept distinct from file hits. Prefers the folder
     embedding space; falls back to a structural scan over the ``folders`` table
@@ -338,6 +366,7 @@ def search_folders(
     if progress is not None:
         progress(0, 3, "Opening folder catalog")
     db = find_root(explicit_root) / ".quack" / DB_NAME
+    hidden = None if include_ignored else _ignored_predicate(explicit_root)
 
     # Folder descriptions, for enriching semantic hits and for the fallback.
     try:
@@ -373,6 +402,9 @@ def search_folders(
             )
     except Exception:
         pass
+    if hidden:
+        for folder in [f for f in hits if hidden(f, True)]:
+            del hits[folder]
 
     # Tier 2: structural fallback over folder path + description.
     if progress is not None:
@@ -393,6 +425,9 @@ def search_folders(
                 score=float(score),
                 via="structural",
             )
+    if hidden:
+        for folder in [f for f in hits if hidden(f, True)]:
+            del hits[folder]
 
     if progress is not None:
         progress(3, 3, "Folder search complete")
