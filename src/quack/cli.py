@@ -378,6 +378,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="also show matching folders alongside file hits (hidden by default)",
     )
     p_search.add_argument(
+        "--include-ignored", "--all", dest="include_ignored", action="store_true",
+        help="also return results from directories the indexer ignores "
+             "(.quackignore rules) or treats as opaque (.git, node_modules, .venv, ...)",
+    )
+    p_search.add_argument(
         "--no-local", action="store_true",
         help="disable current-directory locality boost (search the full workspace equally)",
     )
@@ -1340,6 +1345,7 @@ def _dispatch(argv: list[str] | None) -> int:
                     limit=args.limit,
                     cwd_rel=cwd_rel,
                     progress=progress.update,
+                    include_ignored=args.include_ignored,
                 )
             print(f"# root: {root}  (paths below are relative to it)")
             if cwd_rel:
@@ -1359,6 +1365,7 @@ def _dispatch(argv: list[str] | None) -> int:
                 expand=not args.no_expand,
                 cwd_rel=cwd_rel,
                 progress=progress.update,
+                include_ignored=args.include_ignored,
             )
             # Folders are noise in a file search, so they stay hidden unless the
             # caller asks for them with --with-folders.
@@ -1370,6 +1377,7 @@ def _dispatch(argv: list[str] | None) -> int:
                     limit=args.limit,
                     cwd_rel=cwd_rel,
                     progress=progress.update,
+                    include_ignored=args.include_ignored,
                 )
         has_more = len(hits) > args.limit
         hits = hits[: args.limit]

@@ -313,7 +313,9 @@ def map(
 
 
 @mcp.tool()
-def search(query: str, limit: int | None = None, expand: bool = True) -> dict[str, Any]:
+def search(
+    query: str, limit: int | None = None, expand: bool = True, include_ignored: bool = False
+) -> dict[str, Any]:
     """Auto-hybrid search over files and folders. Returns up to `limit` results.
 
     Field semantics:
@@ -327,16 +329,24 @@ def search(query: str, limit: int | None = None, expand: bool = True) -> dict[st
     - `folders`: populated when the query asks about location/which-folder (separate
       list, never blended with file hits). Call `map()` or `sql()` for more folder detail.
 
+    `include_ignored`: also return hits under ignored (.quackignore) or opaque
+    (.git, node_modules, .venv, ...) directories; hidden by default.
+
     Call `explain()` for a full architecture and schema reference."""
     from .search import route, search_folders
 
     limit = _clamp(limit, LIMITS.search, MAX_SEARCH_LIMIT)
-    hits = do_search(query, explicit_root=_root_arg(), limit=limit, expand=expand)
+    hits = do_search(
+        query, explicit_root=_root_arg(), limit=limit, expand=expand,
+        include_ignored=include_ignored,
+    )
 
     folder_hits: list = []
     routed = route(query)
     if routed in ("folders", "both"):
-        folder_hits = search_folders(query, explicit_root=_root_arg(), limit=limit)
+        folder_hits = search_folders(
+            query, explicit_root=_root_arg(), limit=limit, include_ignored=include_ignored
+        )
 
     if not hits and not folder_hits:
         next_steps = (
