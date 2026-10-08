@@ -474,7 +474,7 @@ def _ollama_model_exists(model: str) -> bool:
 
 def build_embeddings(
     explicit_root: str | None = None,
-    progress: "Callable[[int, int, str], None] | None" = None,
+    progress: "Callable[[int | None, int | None, str], None] | None" = None,
     *,
     rebuild: bool = False,
     timeout: int | None = None,
@@ -498,15 +498,17 @@ def build_embeddings(
     if timeout is not None:
         config.embed.timeout = timeout
 
-    provider_label = config.embed.provider or "custom"
-    if progress is not None:
-        progress(0, 1, f"Connecting to {provider_label} embeddings")
+    def _phase(message: str) -> None:
+        if progress is not None:
+            progress(None, None, message)
 
+    _phase("Loading catalog")
     space = Space.load(explicit_root)
     path = db_path(space)
     if not path.exists():
         raise RuntimeError(f"No catalog at {path}. Run `quack reindex` first.")
 
+    _phase("Scanning files and folders")
     from . import folders as _folders
 
     folder_infos = _folders.resolve_folders(space)
@@ -552,6 +554,7 @@ def build_embeddings(
         )
 
     if cfg.provider == "ollama":
+        _phase("Starting Ollama server")
         _ensure_ollama_server(timeout=cfg.timeout)
 
     invalidate(path)  # free any cached read-only connection before writing
@@ -568,6 +571,8 @@ def build_embeddings(
         probe_key: tuple | None = None
         probe_vec: list[float] | None = None
         if not dim:
+            provider_label = cfg.provider or "custom"
+            _phase(f"Connecting to {provider_label} embeddings")
             probe_items = [("f", *item) for item in file_items] + [
                 ("d", *item) for item in folder_items
             ]
@@ -590,6 +595,7 @@ def build_embeddings(
             con.execute("DROP TABLE IF EXISTS embedding_runs;")
 
         _ensure_embedding_schema(con, dim)
+        _phase("Planning embeddings")
         # Read existing hashes AFTER any potential rebuild drop so that rebuild=True
         # correctly treats all items as uncached.
         old_files = _existing_hashes(con, "embeddings", "rel")
@@ -618,9 +624,43 @@ def build_embeddings(
                 todo.append(("d", rel, parent, source_hash, text))
 
         n_todo = len(todo)
-        total = n_todo + 3  # +3: two HNSW index steps + embedding_runs record
+        total = n_todo
+        if not n_todo and not deleted_files and not deleted_folders:
+            _phase("Indexing file vectors")
+            _ensure_hnsw_index(
+                con,
+                "embeddings",
+                "emb_hnsw",
+                rebuild=False,
+            )
+            _phase("Indexing folder vectors")
+            _ensure_hnsw_index(
+                con,
+                "folder_embeddings",
+                "folder_emb_hnsw",
+                rebuild=False,
+            )
+            n_folders = con.execute("SELECT count(*) FROM folder_embeddings").fetchone()[0]
+            n = con.execute("SELECT count(*) FROM embeddings").fetchone()[0]
+            con.execute("COMMIT")
+            _phase("Nothing to embed; embeddings already up to date")
+            return {
+                "embedded": n,
+                "folders": n_folders,
+                "dim": dim,
+                "updated": 0,
+                "skipped": skipped_files,
+                "deleted": 0,
+                "folders_updated": 0,
+                "folders_skipped": skipped_folders,
+                "folders_deleted": 0,
+                "failed": 0,
+                "folders_failed": 0,
+                "failed_items": [],
+                "up_to_date": True,
+            }
         n_workers, max_workers, backend_label = _embedding_worker_limits(cfg, workers)
-        if backend_label is not None and progress is not None:
+        if n_todo and backend_label is not None and progress is not None:
             progress(0, total, f"Ollama {backend_label}, {n_workers} worker(s)")
 
         def _do_embed(item: tuple) -> tuple:
@@ -736,16 +776,14 @@ def build_embeddings(
                 )
                 updated_folders += 1
 
-        if progress is not None:
-            progress(n_todo, total, "Indexing file vectors")
+        _phase("Indexing file vectors")
         _ensure_hnsw_index(
             con,
             "embeddings",
             "emb_hnsw",
             rebuild=bool(updated_files or deleted_files or rebuild),
         )
-        if progress is not None:
-            progress(n_todo + 1, total, "Indexing folder vectors")
+        _phase("Indexing folder vectors")
         _ensure_hnsw_index(
             con,
             "folder_embeddings",
@@ -754,8 +792,7 @@ def build_embeddings(
         )
         n_folders = con.execute("SELECT count(*) FROM folder_embeddings").fetchone()[0]
         n = con.execute("SELECT count(*) FROM embeddings").fetchone()[0]
-        if progress is not None:
-            progress(n_todo + 2, total, "Recording embedding run")
+        _phase("Recording embedding run")
         con.execute(
             "INSERT INTO embedding_runs VALUES (now(), ?, ?, ?, ?, ?, ?, ?, ?)",
             [
@@ -770,8 +807,7 @@ def build_embeddings(
             ],
         )
         con.execute("COMMIT")
-        if progress is not None:
-            progress(total, total, "Embeddings ready")
+        _phase("Embeddings ready")
     finally:
         try:
             con.execute("ROLLBACK")
