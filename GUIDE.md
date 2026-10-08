@@ -76,6 +76,8 @@ entire graph to find a few neighbours. Read cost scales with *relevance*.
   files of one bulk-data type (`.npy`, `.png`, tensors…), is recorded and tagged
   `dataset` but its files aren't indexed — so a 200k-file data dump can't drown
   the catalog. Tune or disable (set `0`) both in `.quack/config.yaml`.
+- Quack recognizes common data files (parquet, arrow/feather, csv/tsv, jsonl)
+  as queryable data artifacts, with non-sticky default descriptions and tags.
 - Author metadata by editing a folder's `.index.yaml`, or let the assistant
   classify it: `quack generate` writes a description + tags for every file
   missing one (`--stale` also refreshes ones whose file changed since).

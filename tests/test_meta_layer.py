@@ -14,6 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import duckdb
 import pytest
 import yaml
 
@@ -44,8 +45,44 @@ def test_recognize_exact_beats_glob_beats_extension():
     assert "lockfile" in tags
 
 
-def test_recognize_unknown_file_returns_none():
-    assert recognize.recognize_file("weird/thing.xyzzy") is None
+@pytest.mark.parametrize(
+    "path",
+    ["weird/thing.xyzzy", "notes.parquet.txt", "data/file.db"],
+)
+def test_recognize_unknown_file_returns_none(path):
+    assert recognize.recognize_file(path) is None
+
+
+@pytest.mark.parametrize(
+    "extension",
+    [".parquet", ".parq", ".arrow", ".feather", ".jsonl", ".ndjson", ".tsv", ".ipc"],
+)
+def test_recognize_duckdb_data_file(extension):
+    _description, tags = recognize.recognize_file(f"data/example{extension}")
+    assert "data" in tags
+    assert "duckdb" in tags
+
+
+def test_reindex_tags_data_files_by_extension_and_survives_invalid_parquet(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    data = root / "data"
+    data.mkdir()
+    valid = data / "tiny.parquet"
+    with duckdb.connect() as con:
+        con.execute("COPY (SELECT 1 AS value) TO ? (FORMAT PARQUET)", [str(valid)])
+    (data / "broken.parquet").write_bytes(b"not a parquet file")
+
+    reindex(str(root))
+
+    _, rows = catalog.query(
+        "SELECT rel, tags_csv, described_at FROM files "
+        "WHERE rel IN ('data/tiny.parquet', 'data/broken.parquet') ORDER BY rel",
+        explicit_root=str(root),
+    )
+    assert rows == [
+        ("data/broken.parquet", "data,parquet,duckdb", ""),
+        ("data/tiny.parquet", "data,parquet,duckdb", ""),
+    ]
 
 
 def test_recognize_folder_known_and_unknown():

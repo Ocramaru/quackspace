@@ -58,7 +58,7 @@ DEFAULT_DIAGRAM_MAX_DEPTH = 3
 DEFAULT_DATASET_EXTENSIONS: frozenset[str] = frozenset({
     "npy", "npz", "pt", "pth", "ckpt", "safetensors", "onnx", "pb",
     "h5", "hdf5", "tfrecord", "mat", "pkl", "pickle", "bin",
-    "parquet", "arrow", "feather",
+    "parquet", "parq", "arrow", "feather", "ipc",
     "png", "jpg", "jpeg", "bmp", "gif", "tiff", "tif", "webp",
     "wav", "flac", "mp3", "ogg", "mp4", "mov", "avi", "mkv",
     "ply", "pcd",

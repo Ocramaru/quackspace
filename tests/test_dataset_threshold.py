@@ -81,6 +81,27 @@ def test_bulk_extension_folder_recorded_but_not_indexed(tmp_path):
     assert mine[0][0] == 1
 
 
+def test_parq_folder_recorded_but_not_indexed(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    _set_thresholds(root, per_ext=3)
+    data = root / "projects" / "parquet"
+    data.mkdir(parents=True)
+    for i in range(5):
+        (data / f"part{i}.parq").write_bytes(b"PAR1")
+    reindex(str(root))
+
+    _, rows = catalog.query(
+        "SELECT count(*) FROM files WHERE rel LIKE 'projects/parquet/%'",
+        explicit_root=str(root),
+    )
+    assert rows[0][0] == 0
+    _, frows = catalog.query(
+        "SELECT description FROM folders WHERE folder = 'projects/parquet'",
+        explicit_root=str(root),
+    )
+    assert frows and frows[0][0] == "Dataset: 5 .parq files, not indexed."
+
+
 def test_generic_threshold_catches_any_type(tmp_path):
     root = scaffold_root(str(tmp_path / "space"))
     _set_thresholds(root, total=5, per_ext=0)
