@@ -1,8 +1,9 @@
-from __future__ import annotations
+"""`quack info`: counts on a small fixture space, fresh-embedding rules, and no writes."""
 
 import json
 
 import duckdb
+import pytest
 import yaml
 
 from quack import catalog
@@ -85,23 +86,23 @@ def test_info_embedded_counts_distinct_files(tmp_path, capsys):
     before = json.loads(capsys.readouterr().out)
     total = before["embedded"] + before["missing_embeddings"]
 
-    con = duckdb.connect(str(root / ".quack" / catalog.DB_NAME))
+    connection = duckdb.connect(str(root / ".quack" / catalog.DB_NAME))
     try:
-        con.execute(
+        connection.execute(
             "CREATE TABLE embeddings (name VARCHAR, rel VARCHAR, source_hash VARCHAR, vec FLOAT[2])"
         )
         # a.md has two fresh chunk rows, b.md one: two files embedded.
         for rel in ("a.md", "a.md", "b.md"):
-            con.execute(
+            connection.execute(
                 "INSERT INTO embeddings SELECT rel, rel, sha256(? || chr(0) || embed_source_hash), "
                 "[0.0, 1.0] FROM files WHERE rel = ?",
                 [command, rel],
             )
         # A stale vector for c.txt and one for a file no longer indexed don't count.
-        con.execute("INSERT INTO embeddings VALUES ('c.txt', 'c.txt', 'stale', [0.0, 1.0])")
-        con.execute("INSERT INTO embeddings VALUES ('gone.md', 'gone.md', 'h', [0.0, 1.0])")
+        connection.execute("INSERT INTO embeddings VALUES ('c.txt', 'c.txt', 'stale', [0.0, 1.0])")
+        connection.execute("INSERT INTO embeddings VALUES ('gone.md', 'gone.md', 'h', [0.0, 1.0])")
     finally:
-        con.close()
+        connection.close()
 
     assert main(["info", "--root", str(root), "--json"]) == 0
     info = json.loads(capsys.readouterr().out)
@@ -109,6 +110,18 @@ def test_info_embedded_counts_distinct_files(tmp_path, capsys):
     assert info["embedded"] == 2
     assert info["missing_embeddings"] == before["missing_embeddings"] - 2
     assert info["embedded"] + info["missing_embeddings"] == total
+
+
+def test_info_broken_embeddings_query_raises(tmp_path):
+    root = _space(tmp_path, embed_command="quack embed text --provider ollama --model test-model")
+    connection = duckdb.connect(str(root / ".quack" / catalog.DB_NAME))
+    try:
+        connection.execute("CREATE TABLE embeddings (name VARCHAR, rel VARCHAR)")  # no source_hash
+    finally:
+        connection.close()
+
+    with pytest.raises(duckdb.Error):
+        main(["info", "--root", str(root), "--json"])
 
 
 def test_info_text_output(tmp_path, capsys):

@@ -1,7 +1,5 @@
 """Read-only space statistics for ``quack info``."""
 
-from __future__ import annotations
-
 import shlex
 
 import duckdb
@@ -40,8 +38,8 @@ def space_info(explicit_root: str | None = None) -> dict | None:
         folders = con.execute("SELECT count(*) FROM folders").fetchone()[0]
         size = con.execute("SELECT coalesce(sum(size), 0) FROM files").fetchone()[0]
         types = con.execute(
-            "SELECT coalesce(nullif(ext, ''), '(none)') AS t, count(*) AS n "
-            "FROM files GROUP BY t ORDER BY n DESC, t LIMIT ?",
+            "SELECT coalesce(nullif(ext, ''), '(none)') AS extension, count(*) AS file_count "
+            "FROM files GROUP BY extension ORDER BY file_count DESC, extension LIMIT ?",
             [TOP_TYPES],
         ).fetchall()
         row = con.execute(
@@ -51,10 +49,7 @@ def space_info(explicit_root: str | None = None) -> dict | None:
         config = Config.load(str(root))
         embed = config.embed
         enabled = embed.configured and not embed.skip
-        try:
-            embedded = len(fresh_embedded(con, embed.command)) if enabled else 0
-        except duckdb.CatalogException:
-            embedded = 0
+        embedded = len(fresh_embedded(con, embed.command)) if enabled else 0
         try:
             run = con.execute("SELECT max(run_at) FROM embedding_runs").fetchone()[0]
             last_embedded = run.isoformat(timespec="seconds") if run else None
@@ -71,7 +66,9 @@ def space_info(explicit_root: str | None = None) -> dict | None:
         "missing_embeddings": missing,
         "folders": folders,
         "total_size": int(size),
-        "top_types": [{"type": t, "files": n} for t, n in types],
+        "top_types": [
+            {"type": extension, "files": file_count} for extension, file_count in types
+        ],
         "last_indexed": last_indexed,
         "last_embedded": last_embedded,
         "embedding": {

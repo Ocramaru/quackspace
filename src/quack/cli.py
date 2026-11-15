@@ -8,6 +8,7 @@ quickly. Plays well with Obsidian but does not require it.
     quack reindex            regenerate .index.yaml / map.yaml / catalog / diagrams
     quack status             show pending index and embedding work
     quack sync               incrementally refresh the index and embeddings
+    quack info [--json]      read-only stats: files, embeddings, size, types
     quack upgrade            check for and install a newer quackspace release
     quack uninstall          remove workspace integration and the package
     quack describe PATH -d "…" [-t tag,tag]   record a file's description + tags
@@ -963,8 +964,6 @@ def _human_size(n: int) -> str:
 
 
 def _run_info(args) -> int:
-    import json
-
     from .info import space_info
 
     info = space_info(args.root)
