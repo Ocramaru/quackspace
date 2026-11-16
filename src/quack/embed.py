@@ -29,6 +29,7 @@ import duckdb
 
 from .catalog import (
     DB_NAME,
+    FRESH_VECTOR,
     db_path,
     embed_cache_hash,
     embeddable,
@@ -812,7 +813,7 @@ def semantic_search(
             SELECT e.rel, e.name, array_cosine_distance(e.vec, ?::FLOAT[{dim}]) AS dist
             FROM embeddings e
             JOIN files f ON f.rel = e.rel
-            WHERE e.source_hash = sha256(? || chr(0) || f.embed_source_hash)
+            WHERE {FRESH_VECTOR}
             ORDER BY dist LIMIT ?
             """,
             [qvec, config.embed.command, limit],
@@ -842,7 +843,7 @@ def semantic_search_folders(
                    array_cosine_distance(e.vec, ?::FLOAT[{dim}]) AS dist
             FROM folder_embeddings e
             JOIN folders f ON f.folder = e.folder
-            WHERE e.source_hash = sha256(? || chr(0) || f.embed_source_hash)
+            WHERE {FRESH_VECTOR}
             ORDER BY dist LIMIT ?
             """,
             [qvec, config.embed.command, limit],

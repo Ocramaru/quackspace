@@ -47,6 +47,8 @@ from .core import Space, find_root
 
 DB_NAME = "quack.duckdb"
 SCHEMA_VERSION = 5
+# vector `e` is fresh for row `f` under the embed command bound to `?`
+FRESH_VECTOR = "e.source_hash = sha256(? || chr(0) || f.embed_source_hash)"
 
 
 def embeddable(
