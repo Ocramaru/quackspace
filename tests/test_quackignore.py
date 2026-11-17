@@ -9,6 +9,7 @@ import pytest
 from quack.core import IgnoreRuleset, load_ignores
 from quack.indexer import reindex
 from quack.scaffold import scaffold_root
+from quack.search import search, search_folders
 
 
 def ruleset(*lines: str) -> IgnoreRuleset:
@@ -115,9 +116,11 @@ def test_builtins_override_negation():
 
 def test_load_ignores_returns_ruleset(tmp_path):
     root = scaffold_root(str(tmp_path / "space"))
+    (root / ".gitignore").write_text("git-output\n")
     (root / ".quackignore").write_text("dist\n!dist/keep\n/build\n")
     rs = load_ignores(root)
     assert isinstance(rs, IgnoreRuleset)
+    assert rs.is_ignored("git-output", "git-output")
     assert rs.is_ignored("dist", "dist")
     assert not rs.is_ignored("keep", "dist/keep")
     assert rs.is_ignored("build", "build")
@@ -148,6 +151,23 @@ def test_negation_includes_file_in_index(tmp_path):
     assert "logs/debug.log" not in rels
 
 
+def test_gitignore_excludes_file_from_index(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "generated").mkdir()
+    (root / "generated" / "output.txt").write_text("generated")
+    (root / ".gitignore").write_text("generated/\n")
+
+    reindex(str(root))
+
+    import duckdb
+    db = root / ".quack" / "quack.duckdb"
+    con = duckdb.connect(str(db), read_only=True)
+    rels = {row[0] for row in con.execute("SELECT rel FROM files").fetchall()}
+    con.close()
+
+    assert "generated/output.txt" not in rels
+
+
 def test_anchored_pattern_excludes_only_root_match(tmp_path):
     root = scaffold_root(str(tmp_path / "space"))
     (root / "build").mkdir()
@@ -169,3 +189,67 @@ def test_anchored_pattern_excludes_only_root_match(tmp_path):
 
     assert "build/output.txt" not in rels
     assert "src/build/helper.py" in rels
+
+
+def test_folder_search_hides_opaque_folders_by_default(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    node_modules = root / "node_modules"
+    node_modules.mkdir()
+    (node_modules / "package.js").write_text("module.exports = {}")
+    reindex(str(root))
+
+    assert search_folders("node_modules", explicit_root=str(root)) == []
+    hits = search_folders(
+        "node_modules", explicit_root=str(root), include_ignored=True
+    )
+    assert [hit.folder for hit in hits] == ["node_modules"]
+
+
+def _file_rels(root, query, **kw):
+    return {h.entry.rel for h in search(query, explicit_root=str(root), expand=False, **kw)}
+
+
+def test_file_search_hides_opaque_and_ignored_dirs(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    for d in ("src", "gen"):
+        (root / d).mkdir(parents=True)
+    (root / "src" / "zebra-src.txt").write_text("zebra")
+    (root / "gen" / "zebra-gen.txt").write_text("zebra")
+    reindex(str(root))
+
+    # Ignore `gen` only after it was indexed: no reindex needed to hide it.
+    (root / ".quackignore").write_text("gen\n")
+
+    assert _file_rels(root, "zebra") == {"src/zebra-src.txt"}
+    assert _file_rels(root, "zebra", include_ignored=True) == {
+        "src/zebra-src.txt", "gen/zebra-gen.txt"
+    }
+
+
+def test_file_search_hides_newly_gitignored_path(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "tracked").mkdir()
+    (root / "generated").mkdir()
+    (root / "tracked" / "zebra-source.txt").write_text("zebra")
+    (root / "generated" / "zebra-output.txt").write_text("zebra")
+    reindex(str(root))
+
+    # Query-time filtering hides an already-indexed path without reindexing.
+    (root / ".gitignore").write_text("generated/\n")
+
+    assert _file_rels(root, "zebra") == {"tracked/zebra-source.txt"}
+    assert _file_rels(root, "zebra", include_ignored=True) == {
+        "tracked/zebra-source.txt", "generated/zebra-output.txt"
+    }
+
+
+def test_file_search_hides_nested_ignored_paths(tmp_path):
+    root = scaffold_root(str(tmp_path / "space"))
+    (root / "a" / "b" / "gen" / "deep").mkdir(parents=True)
+    (root / "a" / "b" / "zebra-top.txt").write_text("zebra")
+    (root / "a" / "b" / "gen" / "deep" / "zebra-deep.txt").write_text("zebra")
+    reindex(str(root))
+    (root / ".quackignore").write_text("gen\n")
+
+    assert _file_rels(root, "zebra") == {"a/b/zebra-top.txt"}
+    assert "a/b/gen/deep/zebra-deep.txt" in _file_rels(root, "zebra", include_ignored=True)

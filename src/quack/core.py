@@ -110,6 +110,7 @@ GENERATED_FILES = {
 TEXT_BODY_MAX_BYTES = 1_000_000
 
 IGNORE_FILE = ".quackignore"
+GIT_IGNORE_FILE = ".gitignore"
 
 
 class IgnoreRuleset:
@@ -195,16 +196,18 @@ class IgnoreRuleset:
 
 
 def load_ignores(root: Path) -> IgnoreRuleset:
-    """Built-in ignores plus ordered rules from the root's ``.quackignore``.
+    """Built-in ignores plus rules from root ``.gitignore`` and ``.quackignore``.
 
     Supports the full gitignore pattern vocabulary: plain names, path patterns,
     root-anchored ``/pattern``, globs, and negation ``!pattern`` for exceptions.
-    Built-in noise dirs (caches, hidden quack dirs) cannot be negated.
+    Project-specific ``.quackignore`` rules are applied last, so they can refine
+    the repository defaults. Built-in noise dirs cannot be negated.
     """
     lines: list[str] = []
-    f = root / IGNORE_FILE
-    if f.exists():
-        lines = f.read_text().splitlines()
+    for name in (GIT_IGNORE_FILE, IGNORE_FILE):
+        path = root / name
+        if path.exists():
+            lines.extend(path.read_text().splitlines())
     return IgnoreRuleset.build(DEFAULT_IGNORED_DIRS, lines)
 
 # [[wikilink]] or [[wikilink|alias]] or [[note#heading]]. We keep only the
